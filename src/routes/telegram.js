@@ -28,6 +28,22 @@ router.post('/:slug/webhook', async (req, res) => {
   const update = req.body;
 
   try {
+    const updateType = update.message
+      ? 'message'
+      : update.callback_query
+        ? 'callback_query'
+        : 'unknown';
+    const fromId = update.message?.from?.id || update.callback_query?.from?.id || null;
+    const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || null;
+
+    console.info('[WEBHOOK][RECEIVED]', JSON.stringify({
+      slug,
+      updateType,
+      fromId,
+      chatId,
+      hasSecret: Boolean(req.headers['x-telegram-bot-api-secret-token'])
+    }));
+
     // 1. Validar que o bot existe
     const bot = await req.botEngine.getBotBySlug(slug);
     if (!bot) {
@@ -98,15 +114,22 @@ router.post('/:slug/webhook', async (req, res) => {
           // Enviar mensagem de /start
           const messageService = new MessageService(req.pool);
           const crypto = getCryptoService();
-          
+
           // Descriptografar token para envio
           const botToken = bot.token_encrypted ? crypto.decrypt(bot.token_encrypted) : null;
-          
+
           const context = {
             userName: 'Usuário',
             botName: bot.name || 'Bot',
             userId: telegramId
           };
+
+          console.info('[START][PROCESS]', JSON.stringify({
+            slug,
+            botId: bot.id,
+            telegramId,
+            botUserId
+          }));
 
           // Enviar mensagem via Telegram API
           const sendResult = await messageService.sendMessage(

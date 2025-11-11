@@ -237,8 +237,8 @@ router.put('/:id/config/start', async (req, res) => {
       // Atualizar
       messageId = existingResult.rows[0].id;
       await req.pool.query(
-        `UPDATE bot_messages 
-         SET content = $1, updated_at = NOW() 
+        `UPDATE bot_messages
+         SET content = $1, active = TRUE, updated_at = NOW()
          WHERE id = $2`,
         [contentJson, messageId]
       );
