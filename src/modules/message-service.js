@@ -132,16 +132,52 @@ class MessageService {
       }
 
       if (result.rows.length === 0) {
-        console.warn(`[MESSAGE] Template não encontrado: bot=${botId} type=${messageType}`);
+        if (messageType === 'start') {
+          console.warn('[START][LOAD_CONFIG]', JSON.stringify({
+            botId,
+            type: messageType,
+            found: false,
+            reason: 'template_not_found_active'
+          }));
+        } else {
+          console.warn(`[MESSAGE] Template não encontrado: bot=${botId} type=${messageType}`);
+        }
         return null;
       }
 
       const row = result.rows[0];
       // Normalizar content para JSON
       row.content = this.normalizeContent(row.content);
+      if (messageType === 'start') {
+        const messageCount = Array.isArray(row.content.messages)
+          ? row.content.messages.length
+          : row.content.text
+            ? 1
+            : 0;
+        const mediasCount = Array.isArray(row.content.medias) ? row.content.medias.length : 0;
+        console.info('[START][LOAD_CONFIG]', JSON.stringify({
+          botId,
+          type: messageType,
+          found: true,
+          messageId: row.id,
+          messageCount,
+          mediasCount,
+          active: row.active !== false
+        }));
+      }
       return row;
     } catch (error) {
-      console.error(`[ERRO][MESSAGE] Falha ao buscar template: bot=${botId} type=${messageType} error=${error.message}`);
+      if (messageType === 'start') {
+        console.error('[START][LOAD_CONFIG]', JSON.stringify({
+          botId,
+          type: messageType,
+          found: false,
+          reason: 'exception',
+          error: error.message
+        }));
+      } else {
+        console.error(`[ERRO][MESSAGE] Falha ao buscar template: bot=${botId} type=${messageType} error=${error.message}`);
+      }
       return null;
     }
   }
@@ -278,6 +314,13 @@ class MessageService {
     const startTime = Date.now();
 
     try {
+      if (messageType === 'start') {
+        console.info('[START][RESOLVE]', JSON.stringify({
+          botId,
+          telegramId,
+          contextKeys: Object.keys(context || {})
+        }));
+      }
       // 1. Buscar template
       const template = await this.getMessageTemplate(botId, messageType);
       if (!template) {
@@ -292,9 +335,20 @@ class MessageService {
 
       // 4. Preparar payloads para Telegram (um por mensagem)
       const payloads = this.prepareTelegramPayloads(telegramId, renderedContent, medias);
-      
+
       if (!payloads || payloads.length === 0) {
         throw new Error(`Nenhum payload para enviar`);
+      }
+
+      if (messageType === 'start') {
+        console.info('[START][DECISION]', JSON.stringify({
+          botId,
+          telegramId,
+          path: 'custom',
+          reason: 'ok',
+          payloads: payloads.length,
+          medias: medias.length
+        }));
       }
 
       // 5. Enviar via Telegram API (se botToken fornecido)
@@ -347,6 +401,15 @@ class MessageService {
       };
     } catch (error) {
       const duration = Date.now() - startTime;
+      if (messageType === 'start') {
+        console.warn('[START][DECISION]', JSON.stringify({
+          botId,
+          telegramId,
+          path: 'fallback',
+          reason: error.message,
+          latencyMs: duration
+        }));
+      }
       console.error(`[ERRO][MESSAGE] type=${messageType} user=${telegramId} error=${error.message} latency=${duration}ms`);
       return {
         success: false,
