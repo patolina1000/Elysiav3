@@ -1,0 +1,129 @@
+================================================================================
+CONFIGURAÇÃO DO NGROK PARA DESENVOLVIMENTO COM TELEGRAM
+================================================================================
+
+O sistema está configurado para usar ngrok automaticamente em desenvolvimento.
+ngrok cria uma URL pública que permite que o Telegram envie webhooks para sua
+máquina local sem necessidade de deploy.
+
+PASSO 1: INSTALAR NGROK
+================================================================================
+Windows:
+  1. Baixe em: https://ngrok.com/download
+  2. Extraia o arquivo ngrok.exe
+  3. Adicione ao PATH ou use o caminho completo
+
+Alternativa (com Chocolatey):
+  choco install ngrok
+
+PASSO 2: INICIAR NGROK (em um terminal separado)
+================================================================================
+PowerShell:
+  ngrok http 3000
+
+Isso vai exibir algo como:
+  Forwarding    https://abc123def456.ngrok.io -> http://localhost:3000
+
+PASSO 3: INICIAR O SERVIDOR (em outro terminal)
+================================================================================
+PowerShell:
+  npm start
+
+O servidor vai:
+  1. Detectar a URL pública do ngrok automaticamente
+  2. Registrar webhooks do Telegram para todos os bots ativos
+  3. Exibir logs como:
+     [NGROK] ✓ Inicializado com sucesso
+     [NGROK] URL pública: https://abc123def456.ngrok.io
+     [NGROK] ✓ Webhook registrado: seu_bot_slug
+
+PASSO 4: TESTAR WEBHOOKS
+================================================================================
+Abra o navegador e acesse:
+  http://localhost:3000/api/ngrok/status
+
+Deve retornar:
+  {
+    "success": true,
+    "data": {
+      "publicUrl": "https://abc123def456.ngrok.io",
+      "initialized": true
+    }
+  }
+
+PASSO 5: ENVIAR MENSAGEM NO TELEGRAM
+================================================================================
+1. Abra o Telegram
+2. Procure seu bot (ex: @seu_bot_slug)
+3. Envie /start
+4. Você deve receber a mensagem configurada
+5. Verifique os logs do servidor para confirmar
+
+VARIÁVEIS DE AMBIENTE
+================================================================================
+USE_NGROK=true
+  - Força uso de ngrok mesmo em produção (padrão: false em produção)
+  
+NGROK_API_URL=http://localhost:4040/api
+  - URL da API local do ngrok (padrão)
+
+NODE_ENV=development
+  - Ativa ngrok automaticamente (padrão em desenvolvimento)
+
+APIS DE GERENCIAMENTO
+================================================================================
+GET /api/ngrok/status
+  - Status do ngrok e URL pública
+
+POST /api/ngrok/register-webhook/:botId
+  - Registrar webhook para um bot específico
+  - Body: {}
+
+GET /api/ngrok/webhook-info/:botId
+  - Obter informações do webhook registrado
+
+DELETE /api/ngrok/webhook/:botId
+  - Remover webhook de um bot
+
+TROUBLESHOOTING
+================================================================================
+Erro: "ngrok não está conectado"
+  → Certifique-se de que ngrok está rodando em outro terminal
+  → Verifique se está usando: ngrok http 3000
+
+Erro: "Webhook não registrado"
+  → Verifique se o bot tem token_encrypted configurado
+  → Verifique se o bot está ativo (active = true)
+  → Verifique os logs para mensagens de erro
+
+Webhook não recebe mensagens
+  → Verifique a URL pública do ngrok (pode mudar a cada reinício)
+  → Verifique em /api/ngrok/webhook-info/:botId
+  → Teste enviando /start no Telegram
+
+URL do ngrok muda a cada reinício
+  → Isso é normal com ngrok gratuito
+  → O sistema registra automaticamente a nova URL
+  → Com ngrok Pro, você pode usar URL fixa
+
+FLUXO COMPLETO
+================================================================================
+Terminal 1 (ngrok):
+  $ ngrok http 3000
+  Forwarding    https://abc123def456.ngrok.io -> http://localhost:3000
+
+Terminal 2 (servidor):
+  $ npm start
+  [NGROK] ✓ Inicializado com sucesso
+  [NGROK] URL pública: https://abc123def456.ngrok.io
+  [NGROK] ✓ Webhook registrado: seu_bot_slug
+
+Terminal 3 (testes):
+  $ curl http://localhost:3000/api/ngrok/status
+  {"success":true,"data":{"publicUrl":"https://abc123def456.ngrok.io",...}}
+
+Telegram:
+  Envie /start para seu bot
+  Verifique os logs do servidor
+
+================================================================================
