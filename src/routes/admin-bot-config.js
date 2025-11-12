@@ -11,6 +11,7 @@
 
 const express = require('express');
 const router = express.Router();
+const MessageService = require('../modules/message-service');
 
 /**
  * Obter configuração completa do bot
@@ -88,20 +89,31 @@ router.get('/:id/config', async (req, res) => {
         messages = [startMsg.content];
       }
       
+      let mediaMode = content.media_mode;
+      if (mediaMode === undefined || mediaMode === null) {
+        mediaMode = 'group';
+      } else if (!['group', 'single'].includes(mediaMode)) {
+        mediaMode = 'group';
+      }
+
+      const attachTextAsCaption = Boolean(content.attach_text_as_caption);
+
       // Estrutura padrão para compatibilidade
       startConfig = {
         id: startMsg.id,
         messages: messages.length > 0 ? messages : [''],
         medias: Array.isArray(content.medias) ? content.medias : [],
         plans: Array.isArray(content.plans) ? content.plans : [],
-        media_mode: content.media_mode || 'group' // Retrocompatibilidade: padrão 'group'
+        media_mode: mediaMode,
+        attach_text_as_caption: attachTextAsCaption
       };
-      
+
       console.log(`[GET_CONFIG] startConfig retornando:`, {
         messages: startConfig.messages.length,
         medias: startConfig.medias.length,
         plans: startConfig.plans.length,
-        media_mode: startConfig.media_mode
+        media_mode: startConfig.media_mode,
+        attach_text_as_caption: startConfig.attach_text_as_caption
       });
     }
 
@@ -162,7 +174,7 @@ router.get('/:id/config', async (req, res) => {
 router.put('/:id/config/start', async (req, res) => {
   try {
     const { id } = req.params;
-    const { messages, medias, plans, media_mode } = req.body;
+    const { messages, medias, plans, media_mode, attach_text_as_caption } = req.body;
     const botId = parseInt(id, 10);
 
     console.log(`[ADMIN_BOT_CONFIG] Recebido PUT /config/start: messages=${Array.isArray(messages) ? messages.length : 0} medias=${Array.isArray(medias) ? medias.length : 0} plans=${Array.isArray(plans) ? plans.length : 0} media_mode=${media_mode}`);
@@ -221,14 +233,27 @@ router.put('/:id/config/start', async (req, res) => {
     }
 
     // Validar media_mode
-    const validMediaMode = ['group', 'single'].includes(media_mode) ? media_mode : 'group';
+    let normalizedMediaMode = media_mode;
+    if (normalizedMediaMode === undefined || normalizedMediaMode === null) {
+      normalizedMediaMode = 'group';
+    } else if (!['group', 'single'].includes(normalizedMediaMode)) {
+      normalizedMediaMode = 'group';
+    }
+
+    let normalizedAttachTextAsCaption = attach_text_as_caption;
+    if (normalizedAttachTextAsCaption === undefined || normalizedAttachTextAsCaption === null) {
+      normalizedAttachTextAsCaption = false;
+    } else {
+      normalizedAttachTextAsCaption = normalizedAttachTextAsCaption === true || normalizedAttachTextAsCaption === 'true';
+    }
 
     // Estruturar dados para salvar - shape canônico
     const contentJson = JSON.stringify({
       messages: normalizedMessages,
       medias: medias || [],
       plans: plans || [],
-      media_mode: validMediaMode
+      media_mode: normalizedMediaMode,
+      attach_text_as_caption: normalizedAttachTextAsCaption
     });
 
     // Buscar registro canônico (fonte única)
@@ -261,10 +286,13 @@ router.put('/:id/config/start', async (req, res) => {
       messageId = createResult.rows[0].id;
     }
 
+    MessageService.invalidateStartConfigCache(botId);
+    console.info(`START_CONFIG:CACHE_INVALIDATED { botId:${botId} }`);
+
     res.status(200).json({
       success: true,
-      data: { 
-        messageId, 
+      data: {
+        messageId,
         config: JSON.parse(contentJson)
       }
     });
@@ -512,8 +540,6 @@ router.post('/:id/start/preview', async (req, res) => {
       });
     }
 
-    // CP-7: Usar mesmo renderer do /start via MessageService
-    const MessageService = require('../modules/message-service');
     const messageService = new MessageService(req.pool);
 
     const startTime = Date.now();
@@ -521,53 +547,51 @@ router.post('/:id/start/preview', async (req, res) => {
     const messageIds = [];
     const mediaIds = [];
 
-    // CP-7: Normalizar media_mode e attach_text_as_caption (mesmo que CP-1)
-    let normalizedMediaMode = media_mode || 'group';
-    if (normalizedMediaMode !== 'group' && normalizedMediaMode !== 'single') {
+    let normalizedMediaMode = media_mode;
+    if (normalizedMediaMode === undefined || normalizedMediaMode === null) {
+      normalizedMediaMode = 'group';
+    } else if (!['group', 'single'].includes(normalizedMediaMode)) {
       normalizedMediaMode = 'group';
     }
-    
+
     let normalizedAttachTextAsCaption = attach_text_as_caption;
     if (normalizedAttachTextAsCaption === undefined || normalizedAttachTextAsCaption === null) {
       normalizedAttachTextAsCaption = false;
     } else {
-      normalizedAttachTextAsCaption = Boolean(normalizedAttachTextAsCaption);
+      normalizedAttachTextAsCaption = normalizedAttachTextAsCaption === true || normalizedAttachTextAsCaption === 'true';
     }
 
-    // Preparar conteúdo renderizado (mesmo formato do /start)
+    const resolvedMedias = await messageService.mediaResolver.resolveMedias(
+      bot.slug,
+      Array.isArray(medias) ? medias : []
+    );
+
     const renderedContent = {
-      messages: messages,
-      medias: medias || [],
+      messages: Array.isArray(messages) ? messages : [],
+      medias: resolvedMedias,
       buttons: []
     };
 
-    // Preparar payloads usando o mesmo renderer do /start
     const payloads = messageService.prepareTelegramPayloads(
       chatId,
       renderedContent,
-      medias || [],
+      resolvedMedias,
       normalizedMediaMode,
       normalizedAttachTextAsCaption
     );
 
-    // Enviar todos os payloads
-    for (let i = 0; i < payloads.length; i++) {
-      const payload = payloads[i];
-      try {
-        const response = await messageService.sendViaTelegramAPI(botToken, payload);
-        if (response.ok) {
-          if (response.message_ids) {
-            mediaIds.push(...response.message_ids);
-          } else if (response.message_id) {
-            messageIds.push(response.message_id);
-          }
-        }
-      } catch (error) {
-        const errorStatus = error.response?.status;
-        const errorBody = error.response?.data;
-        console.error(`[PREVIEW:PAYLOAD_ERROR] Erro ao enviar payload ${i + 1}: status=${errorStatus} message=${error.message}`);
+    const dispatchResult = await messageService.dispatchPayloads(botToken, payloads);
+    dispatchResult.responses.forEach(response => {
+      if (!response || !response.ok) {
+        return;
       }
-    }
+
+      if (response.message_ids && Array.isArray(response.message_ids)) {
+        mediaIds.push(...response.message_ids);
+      } else if (response.message_id) {
+        messageIds.push(response.message_id);
+      }
+    });
 
     // Enviar planos como mensagem formatada (se houver)
     let plansMessageId = null;
