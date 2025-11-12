@@ -89,7 +89,8 @@ class MessageService {
         text: String(base.text || ''),
         media_ids: ensureArray(base.media_ids),
         buttons: ensureArray(base.buttons),
-        medias: ensureArray(base.medias)
+        medias: ensureArray(base.medias),
+        plans: ensureArray(base.plans)
       };
     }
 
@@ -99,7 +100,8 @@ class MessageService {
       text: '',
       media_ids: [],
       buttons: [],
-      medias: []
+      medias: [],
+      plans: []
     };
   }
 
@@ -279,24 +281,27 @@ class MessageService {
         messages,
         media_ids: contentObj.media_ids || [],
         buttons: contentObj.buttons || [],
-        medias: contentObj.medias || []
+        medias: contentObj.medias || [],
+        plans: Array.isArray(contentObj.plans) ? contentObj.plans : []
       };
     } else if (contentObj.text) {
       // Formato antigo: usar campo text direto
       const text = replaceText(String(contentObj.text));
-      
+
       return {
         text,
         media_ids: contentObj.media_ids || [],
         buttons: contentObj.buttons || [],
-        medias: contentObj.medias || []
+        medias: contentObj.medias || [],
+        plans: Array.isArray(contentObj.plans) ? contentObj.plans : []
       };
     } else {
       return {
         text: '',
         media_ids: [],
         buttons: [],
-        medias: []
+        medias: [],
+        plans: []
       };
     }
   }
@@ -348,6 +353,10 @@ class MessageService {
       // CP-1: Normalizar media_mode e attach_text_as_caption
       let mediaMode = template.content?.media_mode;
       let attachTextAsCaption = template.content?.attach_text_as_caption;
+      const plansFromConfig = Array.isArray(template.content?.plans)
+        ? template.content.plans.slice(0, 10)
+        : [];
+      template.content.plans = plansFromConfig;
 
       if (mediaMode === undefined || mediaMode === null) {
         mediaMode = 'group';
@@ -361,12 +370,22 @@ class MessageService {
         attachTextAsCaption = Boolean(attachTextAsCaption);
       }
 
+      const planCount = plansFromConfig.length;
+
       if (messageType === 'start') {
-        console.info(`START:CONFIG_NORMALIZED { mediaMode:"${mediaMode}", attachTextAsCaption:${attachTextAsCaption} }`);
+        console.info(`START:CONFIG_NORMALIZED { mediaMode:"${mediaMode}", attachTextAsCaption:${attachTextAsCaption}, planCount:${planCount} }`);
       }
 
       // 4. Preparar payloads para Telegram (um por mensagem)
-      const payloads = this.prepareTelegramPayloads(telegramId, renderedContent, medias, mediaMode, attachTextAsCaption);
+      const payloads = this.prepareTelegramPayloads(
+        botId,
+        telegramId,
+        renderedContent,
+        medias,
+        mediaMode,
+        attachTextAsCaption,
+        { origin: messageType === 'start' ? 'start' : 'generic' }
+      );
 
       if (!payloads || payloads.length === 0) {
         throw new Error(`Nenhum payload para enviar`);
@@ -375,7 +394,9 @@ class MessageService {
       // 5. Enviar via Telegram API (se botToken fornecido)
       let responses = [];
       if (botToken) {
-        const dispatchResult = await this.dispatchPayloads(botToken, payloads);
+        const dispatchResult = await this.dispatchPayloads(botToken, payloads, {
+          origin: messageType === 'start' ? 'start' : 'generic'
+        });
         responses = dispatchResult.responses;
       }
 
@@ -527,6 +548,130 @@ class MessageService {
     return { requested: normalizedRequested, decided, eligiblePhotoVideo };
   }
 
+  _formatPriceCents(value) {
+    if (value === undefined || value === null) {
+      return null;
+    }
+
+    let cents = null;
+
+    if (typeof value === 'number') {
+      if (Number.isInteger(value)) {
+        cents = value;
+      } else if (Number.isFinite(value)) {
+        cents = Math.round(value * 100);
+      }
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        const normalizedDecimal = trimmed.replace(',', '.');
+        const decimalCandidate = Number(normalizedDecimal);
+
+        if (!Number.isNaN(decimalCandidate) && /[.,]/.test(trimmed)) {
+          cents = Math.round(decimalCandidate * 100);
+        } else {
+          const digits = trimmed.replace(/[^0-9]/g, '');
+          if (digits) {
+            cents = Number(digits);
+          }
+        }
+      }
+    }
+
+    if (cents === null) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        cents = Number.isInteger(numeric) ? numeric : Math.round(numeric * 100);
+      }
+    }
+
+    if (!Number.isFinite(cents) || cents <= 0) {
+      return null;
+    }
+
+    return (cents / 100).toFixed(2).replace('.', ',');
+  }
+
+  _extractDurationDays(plan) {
+    let duration = plan?.duration_days ?? plan?.durationDays ?? plan?.days ?? plan?.duration;
+
+    if (duration !== undefined && duration !== null) {
+      const parsed = parseInt(duration, 10);
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+
+    const durationSources = [plan?.time, plan?.duration_label, plan?.durationLabel];
+
+    for (const source of durationSources) {
+      if (typeof source !== 'string') {
+        continue;
+      }
+      const match = source.match(/\d+/);
+      if (match) {
+        const parsed = parseInt(match[0], 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+          return parsed;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  _normalizePlansForKeyboard(plans, botId) {
+    if (!Array.isArray(plans) || plans.length === 0 || !botId) {
+      return [];
+    }
+
+    const sanitized = [];
+    const limitedPlans = plans.slice(0, 10);
+
+    limitedPlans.forEach((plan, index) => {
+      if (!plan) {
+        return;
+      }
+
+      const nameCandidate = (plan.name || plan.title || `Plano ${index + 1}`).toString();
+      const safeName = nameCandidate.replace(/\s+/g, ' ').trim() || `Plano ${index + 1}`;
+      const truncatedName = safeName.length > 50 ? `${safeName.slice(0, 47).trim()}…` : safeName;
+
+      const priceFormatted = this._formatPriceCents(plan.price_cents ?? plan.priceCents ?? plan.value ?? plan.amount_cents ?? plan.amountCents ?? plan.price);
+      if (!priceFormatted) {
+        return;
+      }
+
+      const durationDays = this._extractDurationDays(plan);
+
+      let planId = plan.id ?? plan.plan_id ?? plan.planId ?? plan.external_id ?? plan.externalId ?? plan.key ?? plan.slug ?? plan.gateway_id ?? plan.gatewayId;
+      if (planId === undefined || planId === null || planId === '') {
+        planId = `${index + 1}`;
+      }
+
+      let normalizedId = String(planId).replace(/[^a-zA-Z0-9_-]/g, '');
+      if (!normalizedId) {
+        normalizedId = `${index + 1}`;
+      }
+
+      if (normalizedId.length > 32) {
+        normalizedId = normalizedId.slice(0, 32);
+      }
+
+      const callbackData = `plan:${botId}:${normalizedId}`;
+      const label = durationDays && durationDays > 0
+        ? `⭐ ${truncatedName} — ${durationDays}d • R$ ${priceFormatted}`
+        : `⭐ ${truncatedName} — R$ ${priceFormatted}`;
+
+      sanitized.push({
+        text: label,
+        callback_data: callbackData
+      });
+    });
+
+    return sanitized;
+  }
+
   /**
    * Preparar múltiplos payloads para Telegram API
    * - Ordena mídias: áudio > vídeo > foto (mantendo ordem original dentro do tipo)
@@ -535,7 +680,7 @@ class MessageService {
    * - Textos sempre enviados após as mídias, um por mensagem
    * - attachTextAsCaption: quando true, aplica primeiro texto como caption conforme modo decidido
    */
-  prepareTelegramPayloads(telegramId, renderedContent, medias = [], mediaMode = 'group', attachTextAsCaption = false) {
+  prepareTelegramPayloads(botId, telegramId, renderedContent, medias = [], mediaMode = 'group', attachTextAsCaption = false, options = {}) {
     const payloads = [];
     const originalMedias = Array.isArray(medias) ? medias : [];
     const validMedias = originalMedias.filter(media => media && media.tg_file_id);
@@ -585,15 +730,37 @@ class MessageService {
       return captionToUse;
     };
 
-    const buttons = Array.isArray(renderedContent.buttons) ? renderedContent.buttons : [];
-    const buildReplyMarkup = () => ({
-      inline_keyboard: buttons.map(btn => ([{
+    const fallbackButtons = Array.isArray(renderedContent.buttons) ? renderedContent.buttons : [];
+    const buildFallbackReplyMarkup = () => ({
+      inline_keyboard: fallbackButtons.map(btn => ([{
         text: btn.text,
         callback_data: btn.callback_data
       }]))
     });
 
-    let buttonsAttached = false;
+    const originKey = options.origin === 'preview' ? 'PREVIEW' : 'START';
+    const allowPlans = options.origin === 'start' || options.origin === 'preview';
+    const planButtons = allowPlans ? this._normalizePlansForKeyboard(renderedContent?.plans, botId) : [];
+    let planKeyboardContext = null;
+
+    if (planButtons.length > 0) {
+      const rows = [];
+      for (let i = 0; i < planButtons.length; i += 2) {
+        rows.push(planButtons.slice(i, i + 2));
+      }
+
+      planKeyboardContext = {
+        markup: { inline_keyboard: rows },
+        planCount: planButtons.length,
+        rows: rows.length
+      };
+
+      console.info(`${originKey}:PLANS_KEYBOARD_BUILD`, JSON.stringify({
+        planCount: planKeyboardContext.planCount,
+        rows: planKeyboardContext.rows
+      }));
+    }
+
     let singleIndex = 0;
 
     const pushSingleMedia = (media, allowCaption) => {
@@ -678,6 +845,7 @@ class MessageService {
       pendingCaption = null;
     }
 
+    const textPayloads = [];
     let textIndex = 0;
     textMessages.forEach(msg => {
       const text = typeof msg === 'string' ? msg : String(msg || '');
@@ -695,31 +863,91 @@ class MessageService {
       textPayload.__meta = { type: 'text', index: textIndex, length: trimmedText.length };
       textIndex += 1;
 
-      if (!buttonsAttached && buttons.length > 0) {
-        textPayload.reply_markup = buildReplyMarkup();
-        buttonsAttached = true;
-      }
-
-      payloads.push(textPayload);
+      textPayloads.push(textPayload);
     });
 
-    if (!buttonsAttached && buttons.length > 0) {
+    let planAttached = false;
+
+    if (planKeyboardContext) {
+      if (textPayloads.length > 0) {
+        const lastPayload = textPayloads[textPayloads.length - 1];
+        lastPayload.reply_markup = planKeyboardContext.markup;
+        lastPayload.__meta = {
+          ...lastPayload.__meta,
+          planCarrier: true,
+          planCount: planKeyboardContext.planCount,
+          planLogOnDispatch: true,
+          planCarrierCreatedFinal: false
+        };
+        planAttached = true;
+      } else {
+        const finalText = 'Escolha um plano 👇';
+        const finalPayload = {
+          chat_id: telegramId,
+          text: finalText,
+          parse_mode: 'MarkdownV2',
+          reply_markup: planKeyboardContext.markup
+        };
+        finalPayload.__meta = {
+          type: 'text',
+          index: textIndex,
+          length: finalText.length,
+          planCarrier: true,
+          planCount: planKeyboardContext.planCount,
+          planLogOnDispatch: false,
+          planCarrierCreatedFinal: true
+        };
+        textPayloads.push(finalPayload);
+        textIndex += 1;
+
+        console.info(`${originKey}:PLANS_ATTACHED`, JSON.stringify({
+          toMessage: 'created_final',
+          planCount: planKeyboardContext.planCount
+        }));
+
+        planAttached = true;
+      }
+    }
+
+    let buttonsAttached = false;
+
+    if (!planAttached && fallbackButtons.length > 0 && textPayloads.length > 0) {
+      textPayloads[0].reply_markup = buildFallbackReplyMarkup();
+      buttonsAttached = true;
+    }
+
+    textPayloads.forEach(payload => {
+      payloads.push(payload);
+    });
+
+    if (!planAttached && !buttonsAttached && fallbackButtons.length > 0) {
       const firstPayloadWithMarkup = payloads.find(payload => payload.__meta && payload.__meta.type !== 'group');
       if (firstPayloadWithMarkup) {
-        firstPayloadWithMarkup.reply_markup = buildReplyMarkup();
+        firstPayloadWithMarkup.reply_markup = buildFallbackReplyMarkup();
         buttonsAttached = true;
+      } else if (payloads.length === 0) {
+        const buttonsPayload = {
+          chat_id: telegramId,
+          text: ' ',
+          reply_markup: buildFallbackReplyMarkup(),
+          parse_mode: 'MarkdownV2'
+        };
+        buttonsPayload.__meta = { type: 'text', index: textIndex, length: 1 };
+        payloads.push(buttonsPayload);
       }
     }
 
     return payloads;
   }
 
-  async dispatchPayloads(botToken, payloads = []) {
+  async dispatchPayloads(botToken, payloads = [], options = {}) {
     const responses = [];
 
     if (!botToken || !Array.isArray(payloads) || payloads.length === 0) {
       return { responses };
     }
+
+    const originLabel = options.origin === 'preview' ? 'PREVIEW' : 'START';
 
     for (let i = 0; i < payloads.length; i++) {
       const payload = payloads[i];
@@ -733,7 +961,7 @@ class MessageService {
         response = { ok: false, error: error.message };
       }
 
-      const safeError = response && response.error ? response.error.replace(/"/g, '\\"') : null;
+      const safeError = response && response.error ? response.error.replace(/"/g, '\"') : null;
       const count = meta.count || (Array.isArray(apiPayload.media) ? apiPayload.media.length : 0);
       const singleIndex = meta.index ?? i;
       const textLength = meta.length ?? (apiPayload.text ? apiPayload.text.length : 0);
@@ -756,6 +984,20 @@ class MessageService {
           console.info(`START:TEXT_SEND { index:${singleIndex}, len:${textLength} }`);
         } else {
           console.warn(`START:TEXT_SEND { index:${singleIndex}, len:${textLength}, sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
+        }
+      }
+
+      if (meta.planCarrier && meta.planCount && response.ok) {
+        if (meta.planLogOnDispatch !== false) {
+          const messageId = response.message_id
+            || (Array.isArray(response.message_ids) && response.message_ids.length > 0
+              ? response.message_ids[0]
+              : null);
+          const toMessage = messageId !== null ? messageId : 'unknown';
+          console.info(`${originLabel}:PLANS_ATTACHED`, JSON.stringify({
+            toMessage,
+            planCount: meta.planCount
+          }));
         }
       }
 
