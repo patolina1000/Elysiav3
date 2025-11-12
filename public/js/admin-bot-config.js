@@ -1,6 +1,7 @@
 let currentBotId = null;
 let currentConfig = null;
 let currentMediaMode = 'group'; // 'group' ou 'single'
+let currentPlansLayout = 'adjacent'; // 'adjacent' ou 'list'
 
 // Inicializar ao carregar a página
 document.addEventListener('DOMContentLoaded', () => {
@@ -315,7 +316,7 @@ function updateMediaModeDisplay() {
   const modeSelect = document.getElementById('mediaMode');
   const helpText = document.getElementById('mediaModeHelp');
   const mode = modeSelect.value;
-  
+
   currentMediaMode = mode;
   
   if (mode === 'group') {
@@ -323,6 +324,17 @@ function updateMediaModeDisplay() {
   } else {
     helpText.innerHTML = '<strong>Uma por vez:</strong> Todas as mídias são enviadas individualmente, respeitando a ordem: áudio > vídeo > foto.';
   }
+}
+
+function updatePlansLayout() {
+  const layoutSelect = document.getElementById('plansLayout');
+  if (!layoutSelect) {
+    currentPlansLayout = 'adjacent';
+    return;
+  }
+
+  const value = layoutSelect.value;
+  currentPlansLayout = value === 'list' ? 'list' : 'adjacent';
 }
 
 async function saveStartConfiguration() {
@@ -363,8 +375,11 @@ async function saveStartConfiguration() {
     
     // Coletar modo de envio de mídias
     const mediaMode = document.getElementById('mediaMode').value || 'group';
-    
-    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode };
+    const plansLayoutSelect = document.getElementById('plansLayout');
+    const plansLayout = plansLayoutSelect ? plansLayoutSelect.value || 'adjacent' : 'adjacent';
+    currentPlansLayout = plansLayout === 'list' ? 'list' : 'adjacent';
+
+    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode, plan_layout: plansLayout };
     
     const response = await fetch(`/api/admin/bots/${currentBotId}/config/start`, {
       method: 'PUT',
@@ -420,8 +435,11 @@ async function previewStartMessage() {
     
     // Coletar modo de envio de mídias
     const mediaMode = document.getElementById('mediaMode').value || 'group';
-    
-    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode };
+    const plansLayoutSelect = document.getElementById('plansLayout');
+    const plansLayout = plansLayoutSelect ? plansLayoutSelect.value || 'adjacent' : 'adjacent';
+    currentPlansLayout = plansLayout === 'list' ? 'list' : 'adjacent';
+
+    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode, plan_layout: plansLayout };
     
     // Mostrar loading
     showAlert('Enviando preview para o grupo de aquecimento...', 'info');
@@ -903,6 +921,7 @@ function initializeStartConfig(startConfig) {
     currentMedias = [];
     currentPlans = [];
     currentMediaMode = 'group';
+    currentPlansLayout = 'adjacent';
     return;
   }
 
@@ -939,9 +958,14 @@ function initializeStartConfig(startConfig) {
 
   // Garantir que plans é um array
   currentPlans = Array.isArray(startConfig.plans) ? startConfig.plans : [];
-  
+
   // Carregar media_mode (padrão: 'group' para retrocompatibilidade)
   currentMediaMode = startConfig.media_mode || 'group';
+  if (startConfig.plan_layout === 'list' || startConfig.planLayout === 'list') {
+    currentPlansLayout = 'list';
+  } else {
+    currentPlansLayout = 'adjacent';
+  }
 }
 
 // Atualizar função renderStartMessage para inicializar estados
@@ -963,5 +987,11 @@ function renderStartMessage() {
   if (mediaModeSelect) {
     mediaModeSelect.value = currentMediaMode;
     updateMediaModeDisplay();
+  }
+
+  const plansLayoutSelect = document.getElementById('plansLayout');
+  if (plansLayoutSelect) {
+    plansLayoutSelect.value = currentPlansLayout;
+    updatePlansLayout();
   }
 }
