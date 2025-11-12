@@ -569,18 +569,24 @@ router.post('/:id/start/preview', async (req, res) => {
     const renderedContent = {
       messages: Array.isArray(messages) ? messages : [],
       medias: resolvedMedias,
-      buttons: []
+      buttons: [],
+      plans: Array.isArray(plans) ? plans : []
     };
 
     const payloads = messageService.prepareTelegramPayloads(
+      botId,
       chatId,
       renderedContent,
       resolvedMedias,
       normalizedMediaMode,
-      normalizedAttachTextAsCaption
+      normalizedAttachTextAsCaption,
+      { origin: 'preview' }
     );
 
-    const dispatchResult = await messageService.dispatchPayloads(botToken, payloads);
+    const dispatchResult = await messageService.dispatchPayloads(botToken, payloads, { origin: 'preview' });
+
+    let plansMessageId = null;
+
     dispatchResult.responses.forEach(response => {
       if (!response || !response.ok) {
         return;
@@ -591,34 +597,13 @@ router.post('/:id/start/preview', async (req, res) => {
       } else if (response.message_id) {
         messageIds.push(response.message_id);
       }
-    });
 
-    // Enviar planos como mensagem formatada (se houver)
-    let plansMessageId = null;
-    if (plans && Array.isArray(plans) && plans.length > 0) {
-      try {
-        let plansText = '<b>📋 Planos Disponíveis:</b>\n\n';
-        plans.forEach((plan, idx) => {
-          const valueFormatted = (plan.value / 100).toFixed(2).replace('.', ',');
-          plansText += `${idx + 1}. <b>${plan.name}</b>\n`;
-          plansText += `   ⏱️ ${plan.time}\n`;
-          plansText += `   💰 R$ ${valueFormatted}\n\n`;
-        });
-
-        const plansPayload = {
-          chat_id: chatId,
-          text: plansText,
-          parse_mode: 'HTML'
-        };
-
-        const response = await messageService.sendViaTelegramAPI(botToken, plansPayload);
-        if (response.ok && response.message_id) {
-          plansMessageId = response.message_id;
-        }
-      } catch (error) {
-        console.error('[PREVIEW:PLANS_ERROR] Erro ao enviar planos:', error.message);
+      if (!plansMessageId && response.meta && response.meta.planCarrier && response.message_id) {
+        plansMessageId = response.message_id;
+      } else if (!plansMessageId && response.meta && response.meta.planCarrier && Array.isArray(response.message_ids) && response.message_ids.length > 0) {
+        plansMessageId = response.message_ids[0];
       }
-    }
+    });
 
     const latency = Date.now() - startTime;
 

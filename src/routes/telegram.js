@@ -78,7 +78,101 @@ router.post('/:slug/webhook', async (req, res) => {
     // Processamento assíncrono (não bloqueia resposta)
     setImmediate(async () => {
       try {
-        const { telegramId, chatId, command, text } = normalizedEvent;
+        const messageService = new MessageService(req.pool);
+        const crypto = getCryptoService();
+
+        let botToken = null;
+        try {
+          botToken = bot.token_encrypted ? crypto.decrypt(bot.token_encrypted) : null;
+        } catch (decryptError) {
+          console.error('[ERRO:BOT_TOKEN_DECRYPT]', JSON.stringify({
+            slug,
+            botId: bot.id,
+            error: decryptError.message
+          }));
+        }
+
+        const { telegramId, chatId } = normalizedEvent;
+
+        if (normalizedEvent.type === 'callback_query') {
+          const data = normalizedEvent.data || '';
+
+          if (data && data.startsWith('plan:')) {
+            const parts = data.split(':');
+            const dataBotId = parts.length > 1 ? parseInt(parts[1], 10) : bot.id;
+            const planId = parts.length > 2 ? parts.slice(2).join(':') : null;
+
+            console.info('[PLAN:CLICK]', JSON.stringify({
+              botId: Number.isNaN(dataBotId) ? bot.id : dataBotId,
+              planId,
+              from: telegramId
+            }));
+
+            if (!botToken) {
+              console.warn('[PLAN:CLICK:NO_TOKEN]', JSON.stringify({
+                slug,
+                botId: bot.id,
+                telegramId
+              }));
+              return;
+            }
+
+            const axios = require('axios');
+            const ackText = 'ainda criando o sistema de geração de pix';
+            const apiUrl = `https://api.telegram.org/bot${botToken}`;
+
+            try {
+              const ackResponse = await axios.post(
+                `${apiUrl}/answerCallbackQuery`,
+                {
+                  callback_query_id: update.callback_query.id,
+                  text: ackText,
+                  show_alert: false
+                },
+                { timeout: 5000, validateStatus: () => true }
+              );
+
+              if (ackResponse.data?.ok) {
+                console.info('[PLAN:ACK_SENT]');
+              } else {
+                console.warn('[PLAN:ACK_FAILED]', JSON.stringify({
+                  description: ackResponse.data?.description || 'unknown'
+                }));
+              }
+            } catch (error) {
+              console.error('[ERRO:PLAN:ACK]', JSON.stringify({
+                botId: bot.id,
+                error: error.message
+              }));
+            }
+
+            try {
+              const placeholderResponse = await messageService.sendViaTelegramAPI(botToken, {
+                chat_id: chatId,
+                text: ackText
+              });
+
+              if (placeholderResponse.ok) {
+                console.info('[PLAN:PLACEHOLDER_MESSAGE_SENT]', JSON.stringify({
+                  messageId: placeholderResponse.message_id || null
+                }));
+              } else {
+                console.warn('[PLAN:PLACEHOLDER_MESSAGE_FAILED]', JSON.stringify({
+                  error: placeholderResponse.error || 'unknown'
+                }));
+              }
+            } catch (error) {
+              console.error('[ERRO:PLAN:PLACEHOLDER]', JSON.stringify({
+                botId: bot.id,
+                error: error.message
+              }));
+            }
+          }
+
+          return;
+        }
+
+        const { command, text } = normalizedEvent;
 
         // 3. Registrar usuário em bot_users se necessário
         let botUser = await req.pool.query(
@@ -144,13 +238,6 @@ router.post('/:slug/webhook', async (req, res) => {
             'UPDATE bot_users SET last_start_at = NOW() WHERE id = $1',
             [botUserId]
           );
-
-          // Enviar mensagem de /start
-          const messageService = new MessageService(req.pool);
-          const crypto = getCryptoService();
-
-          // Descriptografar token para envio
-          const botToken = bot.token_encrypted ? crypto.decrypt(bot.token_encrypted) : null;
 
           if (!botToken) {
             console.warn('[START:NO_TOKEN]', JSON.stringify({
