@@ -32,11 +32,12 @@ class MediaResolver {
     const startTime = Date.now();
     const reasonsSkipped = [];
     const resolvedMedias = [];
+    const totalInConfig = Array.isArray(mediasInConfig) ? mediasInConfig.length : 0;
 
-    console.log(`[MEDIA_RESOLVER] Iniciando resolução: bot_slug=${botSlug}, medias_in_config=${mediasInConfig.length}`);
+    console.info(`START:MEDIA_RESOLVE_START { mediasInConfig:${totalInConfig} }`);
 
     if (!mediasInConfig || mediasInConfig.length === 0) {
-      console.log(`[MEDIA_RESOLVER] Nenhuma mídia para resolver`);
+      console.info('START:MEDIA_RESOLVE_END { mediasInConfig:0, resolved:0, skipped:0 }');
       return resolvedMedias;
     }
 
@@ -100,6 +101,8 @@ class MediaResolver {
     }
 
     const duration = Date.now() - startTime;
+    console.info(`START:MEDIA_RESOLVE_END { mediasInConfig:${mediasInConfig.length}, resolved:${resolvedMedias.length}, skipped:${reasonsSkipped.length} }`);
+
     console.log(`[MEDIA_RESOLVER] Completo: medias_in_config=${mediasInConfig.length}, resolved=${resolvedMedias.length}, skipped=${reasonsSkipped.length}, duration=${duration}ms`);
 
     return resolvedMedias;

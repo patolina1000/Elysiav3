@@ -29,11 +29,19 @@
 
 const MediaResolver = require('./media-resolver');
 
+const startConfigCache = new Map();
+
 class MessageService {
   constructor(pool, config = {}) {
     this.pool = pool;
     this.config = config;
     this.mediaResolver = new MediaResolver(pool, config);
+  }
+
+  static invalidateStartConfigCache(botId) {
+    if (!botId) return;
+    const cacheKey = `${botId}:start`;
+    startConfigCache.delete(cacheKey);
   }
 
   /**
@@ -101,11 +109,20 @@ class MessageService {
       let result;
       let query;
       let params;
+      let cacheKey = null;
+
+      if (messageType === 'start') {
+        cacheKey = `${botId}:start`;
+        if (startConfigCache.has(cacheKey)) {
+          const cachedTemplate = startConfigCache.get(cacheKey);
+          return JSON.parse(JSON.stringify(cachedTemplate));
+        }
+      }
 
       if (messageType === 'start') {
         // Buscar em bot_messages com slug='start' - fonte única
-        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
-                 FROM bot_messages 
+        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at
+                 FROM bot_messages
                  WHERE bot_id = $1 AND slug = $2 AND active = TRUE 
                  ORDER BY updated_at DESC, id DESC
                  LIMIT 1`;
@@ -145,8 +162,16 @@ class MessageService {
 
       const row = result.rows[0];
       // Normalizar content para JSON
-      row.content = this.normalizeContent(row.content);
-      return row;
+      const normalizedRow = {
+        ...row,
+        content: this.normalizeContent(row.content)
+      };
+
+      if (cacheKey) {
+        startConfigCache.set(cacheKey, normalizedRow);
+      }
+
+      return JSON.parse(JSON.stringify(normalizedRow));
     } catch (error) {
       if (messageType === 'start') {
         console.error('[ERRO:START:TEMPLATE_QUERY]', JSON.stringify({
@@ -315,29 +340,23 @@ class MessageService {
       const renderedContent = this.renderContent(template, context);
 
       // CP-1: Normalizar media_mode e attach_text_as_caption
-      // Se ausentes, usar defaults: media_mode='group', attach_text_as_caption=false
-      let mediaMode = template.content?.media_mode || 'group';
+      let mediaMode = template.content?.media_mode;
       let attachTextAsCaption = template.content?.attach_text_as_caption;
-      
-      // Validar media_mode (aceitar apenas 'group' ou 'single')
-      if (mediaMode !== 'group' && mediaMode !== 'single') {
+
+      if (mediaMode === undefined || mediaMode === null) {
+        mediaMode = 'group';
+      } else if (mediaMode !== 'group' && mediaMode !== 'single') {
         mediaMode = 'group';
       }
-      
-      // Normalizar attach_text_as_caption (default: false se ausente)
+
       if (attachTextAsCaption === undefined || attachTextAsCaption === null) {
         attachTextAsCaption = false;
       } else {
         attachTextAsCaption = Boolean(attachTextAsCaption);
       }
-      
+
       if (messageType === 'start') {
-        console.info('[START:CONFIG_NORMALIZED]', JSON.stringify({
-          botId,
-          mediaMode,
-          attachTextAsCaption,
-          timestamp: new Date().toISOString()
-        }));
+        console.info(`START:CONFIG_NORMALIZED { mediaMode:"${mediaMode}", attachTextAsCaption:${attachTextAsCaption} }`);
       }
 
       // 4. Preparar payloads para Telegram (um por mensagem)
@@ -350,19 +369,8 @@ class MessageService {
       // 5. Enviar via Telegram API (se botToken fornecido)
       let responses = [];
       if (botToken) {
-        for (let i = 0; i < payloads.length; i++) {
-          const payload = payloads[i];
-          try {
-            const response = await this.sendViaTelegramAPI(botToken, payload);
-            responses.push(response);
-            // Pequeno delay entre mensagens para não sobrecarregar Telegram
-            if (i < payloads.length - 1) {
-              await new Promise(resolve => setTimeout(resolve, 100));
-            }
-          } catch (sendError) {
-            // Continuar tentando enviar as próximas mensagens
-          }
-        }
+        const dispatchResult = await this.dispatchPayloads(botToken, payloads);
+        responses = dispatchResult.responses;
       }
 
       // 6. Registrar em funnel_events
@@ -458,20 +466,34 @@ class MessageService {
    * Mantém ordem original dentro de cada tipo
    */
   prioritizeMedias(medias = []) {
-    const priorityMap = {
-      'audio': 0,
-      'video': 1,
-      'photo': 2,
-      'document': 3
+    if (!Array.isArray(medias) || medias.length === 0) {
+      return [];
+    }
+
+    const buckets = {
+      audio: [],
+      video: [],
+      photo: [],
+      other: []
     };
 
-    const sorted = [...medias].sort((a, b) => {
-      const priorityA = priorityMap[a.kind] !== undefined ? priorityMap[a.kind] : 99;
-      const priorityB = priorityMap[b.kind] !== undefined ? priorityMap[b.kind] : 99;
-      return priorityA - priorityB;
+    medias.forEach(media => {
+      if (!media) {
+        return;
+      }
+
+      if (media.kind === 'audio') {
+        buckets.audio.push(media);
+      } else if (media.kind === 'video') {
+        buckets.video.push(media);
+      } else if (media.kind === 'photo') {
+        buckets.photo.push(media);
+      } else {
+        buckets.other.push(media);
+      }
     });
 
-    return sorted;
+    return [...buckets.audio, ...buckets.video, ...buckets.photo, ...buckets.other];
   }
 
   /**
@@ -481,183 +503,264 @@ class MessageService {
    * 
    * @param {string} requestedMode - 'group' ou 'single' (do template)
    * @param {array} medias - array de mídias resolvidas
-   * @returns {object} { decided: 'group'|'single', reason: string }
+   * @returns {object} { requested: string, decided: string, eligiblePhotoVideo: number }
    */
   decideMediaMode(requestedMode, medias = []) {
-    // Contar mídias elegíveis para group (foto/vídeo com tg_file_id)
-    const elegibleForGroup = medias.filter(m => 
-      ['photo', 'video'].includes(m.kind) && m.tg_file_id
+    const normalizedRequested = requestedMode === 'single' ? 'single' : 'group';
+    const eligiblePhotoVideo = medias.filter(media =>
+      ['photo', 'video'].includes(media.kind) && media.tg_file_id
     ).length;
 
-    // Decidir rigidamente
-    const decided = (requestedMode === 'group' && elegibleForGroup >= 2) ? 'group' : 'single';
-    const reason = requestedMode === 'group' 
-      ? (elegibleForGroup >= 2 ? `group_eligible_${elegibleForGroup}_medias` : `single_fallback_only_${elegibleForGroup}_elegible`)
-      : 'single_requested';
+    let decided = 'single';
+    if (normalizedRequested === 'single') {
+      decided = 'single';
+    } else if (eligiblePhotoVideo >= 2) {
+      decided = 'group';
+    }
 
-    return { decided, reason };
+    return { requested: normalizedRequested, decided, eligiblePhotoVideo };
   }
 
   /**
    * Preparar múltiplos payloads para Telegram API
-   * Um payload por mensagem (suporta até 3 mensagens)
-   * Mídias são anexadas apenas à primeira mensagem
-   * renderedContent: { text, media_ids, buttons, medias, media_mode }
-   * media_mode: 'group' (álbum) ou 'single' (individual)
-   * attachTextAsCaption: se true, usar primeiro texto como caption do primeiro item
+   * - Ordena mídias: áudio > vídeo > foto (mantendo ordem original dentro do tipo)
+   * - Modo group: áudios/documentos enviados individualmente, fotos/vídeos em álbum (máx. 10)
+   * - Modo single: todas as mídias enviadas individualmente na ordem priorizada
+   * - Textos sempre enviados após as mídias, um por mensagem
+   * - attachTextAsCaption: quando true, aplica primeiro texto como caption conforme modo decidido
    */
   prepareTelegramPayloads(telegramId, renderedContent, medias = [], mediaMode = 'group', attachTextAsCaption = false) {
     const payloads = [];
-    
-    // Priorizar mídias: áudio > vídeo > foto
-    const prioritizedMedias = this.prioritizeMedias(medias);
-    
-    // CP-2: Decidir rigidamente entre group/single baseado em elegibilidade
+    const originalMedias = Array.isArray(medias) ? medias : [];
+    const validMedias = originalMedias.filter(media => media && media.tg_file_id);
+    const prioritizedMedias = this.prioritizeMedias(validMedias);
     const modeDecision = this.decideMediaMode(mediaMode, prioritizedMedias);
-    const decidedMode = modeDecision.decided;
-    
-    console.info('[START:MEDIA_MODE]', JSON.stringify({
-      requested: mediaMode,
-      decided: decidedMode,
-      reason: modeDecision.reason,
-      mediaCount: prioritizedMedias.length,
-      timestamp: new Date().toISOString()
-    }));
 
-    // Logar ordem de priorização
-    if (prioritizedMedias.length > 0) {
-      const order = prioritizedMedias.map(m => m.kind);
-      console.info('[START:MEDIA_ORDER]', JSON.stringify({
-        before: medias.length,
-        after_sorted: prioritizedMedias.length,
-        order: order,
-        timestamp: new Date().toISOString()
-      }));
+    console.info(`START:MEDIA_MODE { requested:"${modeDecision.requested}", eligiblePhotoVideo:${modeDecision.eligiblePhotoVideo}, decided:"${modeDecision.decided}" }`);
+
+    const orderList = prioritizedMedias.map(media => media.kind).join(',');
+    console.info(`START:MEDIA_ORDER { before:${originalMedias.length}, after_sorted:${prioritizedMedias.length}, order:[${orderList}] }`);
+
+    console.info(`START:CAPTION_POLICY { attach:${attachTextAsCaption ? 'true' : 'false'} }`);
+
+    const textMessages = [];
+    if (Array.isArray(renderedContent.messages)) {
+      renderedContent.messages.forEach(msg => {
+        if (typeof msg === 'string') {
+          textMessages.push(msg);
+        } else if (msg && typeof msg === 'object' && msg.text) {
+          textMessages.push(String(msg.text));
+        } else if (msg !== undefined && msg !== null) {
+          textMessages.push(String(msg));
+        }
+      });
+    } else if (renderedContent.text) {
+      textMessages.push(String(renderedContent.text));
     }
-    
-    // Se houver array de mensagens, criar um payload por mensagem
-    if (renderedContent.messages && Array.isArray(renderedContent.messages)) {
-      renderedContent.messages.forEach((msgItem, index) => {
-        // Garantir que msgItem é string
-        const text = typeof msgItem === 'string' ? msgItem : String(msgItem || '');
-        const trimmedText = (text || '').trim();
-        
-        if (!trimmedText) {
+
+    let pendingCaption = null;
+    let captionSourceForText = null;
+    let captionApplied = false;
+
+    if (attachTextAsCaption && prioritizedMedias.length > 0 && textMessages.length > 0) {
+      captionSourceForText = textMessages.shift();
+      const captionCandidate = String(captionSourceForText || '').trim();
+      pendingCaption = captionCandidate.slice(0, 1024);
+    }
+
+    const applyCaption = () => {
+      if (pendingCaption === null) {
+        return null;
+      }
+      const captionToUse = pendingCaption;
+      pendingCaption = null;
+      captionApplied = true;
+      console.info(`START:CAPTION_APPLIED { on:"${modeDecision.decided}", length:${captionToUse.length} }`);
+      return captionToUse;
+    };
+
+    const buttons = Array.isArray(renderedContent.buttons) ? renderedContent.buttons : [];
+    const buildReplyMarkup = () => ({
+      inline_keyboard: buttons.map(btn => ([{
+        text: btn.text,
+        callback_data: btn.callback_data
+      }]))
+    });
+
+    let buttonsAttached = false;
+    let singleIndex = 0;
+
+    const pushSingleMedia = (media, allowCaption) => {
+      const payload = { chat_id: telegramId };
+      const telegramType = this.mapMediaKindToTelegramType(media.kind);
+      const field = telegramType === 'audio'
+        ? 'audio'
+        : telegramType === 'video'
+          ? 'video'
+          : telegramType === 'document'
+            ? 'document'
+            : 'photo';
+
+      payload[field] = media.tg_file_id;
+
+      if (allowCaption) {
+        const caption = applyCaption();
+        if (caption) {
+          payload.caption = caption;
+          payload.parse_mode = 'MarkdownV2';
+        }
+      }
+
+      payload.__meta = { type: 'media-single', index: singleIndex++, kind: media.kind };
+      payloads.push(payload);
+    };
+
+    if (modeDecision.decided === 'group') {
+      const processed = new Set();
+
+      prioritizedMedias.forEach(media => {
+        if (media.kind === 'audio') {
+          pushSingleMedia(media, false);
+          processed.add(media);
+        }
+      });
+
+      const groupableMedias = prioritizedMedias.filter(media => ['photo', 'video'].includes(media.kind));
+      const albumMedias = groupableMedias.slice(0, 10);
+
+      if (albumMedias.length > 0) {
+        const albumPayload = {
+          chat_id: telegramId,
+          media: albumMedias.map((media, index) => {
+            const item = {
+              type: this.mapMediaKindToTelegramType(media.kind),
+              media: media.tg_file_id
+            };
+
+            if (index === 0) {
+              const caption = applyCaption();
+              if (caption) {
+                item.caption = caption;
+                item.parse_mode = 'MarkdownV2';
+              }
+            }
+
+            return item;
+          })
+        };
+
+        albumPayload.__meta = { type: 'group', count: albumMedias.length };
+        payloads.push(albumPayload);
+        albumMedias.forEach(media => processed.add(media));
+      }
+
+      prioritizedMedias.forEach(media => {
+        if (processed.has(media)) {
           return;
         }
-        
-        const payload = {
-          chat_id: telegramId,
-          text: trimmedText,
-          parse_mode: 'MarkdownV2'
-        };
-        
-        // Anexar mídias apenas à primeira mensagem
-        if (index === 0 && prioritizedMedias.length > 0) {
-          // Filtrar mídias que têm tg_file_id (nunca enviar URL diretamente)
-          const validMedias = prioritizedMedias.filter(media => media.tg_file_id);
-          
-          if (validMedias.length > 0) {
-            if (decidedMode === 'group') {
-              // Modo grupo: agrupar fotos e vídeos em álbum, enviar áudios isoladamente
-              const groupableMedias = validMedias.filter(m => ['photo', 'video'].includes(m.kind));
-              const isolatedMedias = validMedias.filter(m => !['photo', 'video'].includes(m.kind));
-              
-              if (groupableMedias.length > 0) {
-                // Criar payload de álbum (máximo 10 itens)
-                // CP-1: Respeitar attachTextAsCaption - só adicionar caption se true
-                payload.media = groupableMedias.slice(0, 10).map((media, mediaIndex) => ({
-                  type: this.mapMediaKindToTelegramType(media.kind),
-                  media: media.tg_file_id,
-                  caption: (mediaIndex === 0 && attachTextAsCaption) ? trimmedText : undefined,
-                  parse_mode: 'MarkdownV2'
-                }));
-                
-                console.info('[START:MEDIA_GROUP:SEND]', JSON.stringify({
-                  items: groupableMedias.length,
-                  sent: true,
-                  reason: 'group_mode',
-                  timestamp: new Date().toISOString()
-                }));
-              }
-              
-              // Mídias isoladas (áudio, documento) serão enviadas em payloads separados
-              isolatedMedias.forEach((media, isolatedIndex) => {
-                const isolatedPayload = {
-                  chat_id: telegramId,
-                  parse_mode: 'MarkdownV2'
-                };
-                
-                const mediaType = this.mapMediaKindToTelegramType(media.kind);
-                isolatedPayload[mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : 'photo'] = media.tg_file_id;
-                
-                if (isolatedIndex === 0 && !payload.media) {
-                  // Se não houver álbum, adicionar caption ao primeiro isolado
-                  isolatedPayload.caption = trimmedText;
-                }
-                
-                payloads.push(isolatedPayload);
-                
-                console.info('[START:MEDIA_SINGLE:SEND]', JSON.stringify({
-                  index: isolatedIndex,
-                  kind: media.kind,
-                  sent: true,
-                  timestamp: new Date().toISOString()
-                }));
-              });
-            } else {
-              // Modo single: enviar cada mídia individualmente
-              validMedias.forEach((media, mediaIndex) => {
-                const singlePayload = {
-                  chat_id: telegramId,
-                  parse_mode: 'MarkdownV2'
-                };
-                
-                const mediaType = this.mapMediaKindToTelegramType(media.kind);
-                singlePayload[mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : mediaType === 'video' ? 'video' : 'photo'] = media.tg_file_id;
-                
-                // CP-1: Respeitar attachTextAsCaption - só adicionar caption ao primeiro se true
-                if (mediaIndex === 0 && attachTextAsCaption) {
-                  singlePayload.caption = trimmedText;
-                }
-                
-                payloads.push(singlePayload);
-                
-                console.info('[START:MEDIA_SINGLE:SEND]', JSON.stringify({
-                  index: mediaIndex,
-                  kind: media.kind,
-                  sent: true,
-                  timestamp: new Date().toISOString()
-                }));
-              });
-            }
-          }
-        }
-        
-        // Anexar botões apenas à primeira mensagem
-        if (index === 0 && renderedContent.buttons && renderedContent.buttons.length > 0) {
-          payload.reply_markup = {
-            inline_keyboard: renderedContent.buttons.map(btn => [
-              {
-                text: btn.text,
-                callback_data: btn.callback_data
-              }
-            ])
-          };
-        }
-        
-        // Sempre adicionar payload de texto (com ou sem mídias)
-        payloads.push(payload);
+        pushSingleMedia(media, false);
+        processed.add(media);
       });
     } else {
-      // Fallback: usar o método antigo de um único payload
-      const payload = this.prepareTelegramPayload(telegramId, renderedContent, prioritizedMedias, mediaMode, attachTextAsCaption);
-      if (payload) {
-        payloads.push(payload);
+      prioritizedMedias.forEach((media, index) => {
+        pushSingleMedia(media, index === 0);
+      });
+    }
+
+    if (!captionApplied && captionSourceForText !== null) {
+      textMessages.unshift(captionSourceForText);
+      pendingCaption = null;
+    }
+
+    let textIndex = 0;
+    textMessages.forEach(msg => {
+      const text = typeof msg === 'string' ? msg : String(msg || '');
+      const trimmedText = text.trim();
+      if (!trimmedText) {
+        return;
+      }
+
+      const textPayload = {
+        chat_id: telegramId,
+        text: trimmedText,
+        parse_mode: 'MarkdownV2'
+      };
+
+      textPayload.__meta = { type: 'text', index: textIndex, length: trimmedText.length };
+      textIndex += 1;
+
+      if (!buttonsAttached && buttons.length > 0) {
+        textPayload.reply_markup = buildReplyMarkup();
+        buttonsAttached = true;
+      }
+
+      payloads.push(textPayload);
+    });
+
+    if (!buttonsAttached && buttons.length > 0) {
+      const firstPayloadWithMarkup = payloads.find(payload => payload.__meta && payload.__meta.type !== 'group');
+      if (firstPayloadWithMarkup) {
+        firstPayloadWithMarkup.reply_markup = buildReplyMarkup();
+        buttonsAttached = true;
       }
     }
-    
+
     return payloads;
+  }
+
+  async dispatchPayloads(botToken, payloads = []) {
+    const responses = [];
+
+    if (!botToken || !Array.isArray(payloads) || payloads.length === 0) {
+      return { responses };
+    }
+
+    for (let i = 0; i < payloads.length; i++) {
+      const payload = payloads[i];
+      const meta = payload.__meta || {};
+      const { __meta, ...apiPayload } = payload;
+      let response;
+
+      try {
+        response = await this.sendViaTelegramAPI(botToken, apiPayload);
+      } catch (error) {
+        response = { ok: false, error: error.message };
+      }
+
+      const safeError = response && response.error ? response.error.replace(/"/g, '\\"') : null;
+      const count = meta.count || (Array.isArray(apiPayload.media) ? apiPayload.media.length : 0);
+      const singleIndex = meta.index ?? i;
+      const textLength = meta.length ?? (apiPayload.text ? apiPayload.text.length : 0);
+
+      if (meta.type === 'group') {
+        if (response.ok) {
+          console.info(`START:SEND:GROUP { count:${count}, sent:true }`);
+        } else {
+          console.warn(`START:SEND:GROUP { count:${count}, sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
+        }
+      } else if (meta.type === 'media-single') {
+        const kind = meta.kind || 'unknown';
+        if (response.ok) {
+          console.info(`START:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:true }`);
+        } else {
+          console.warn(`START:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
+        }
+      } else if (meta.type === 'text') {
+        if (response.ok) {
+          console.info(`START:TEXT_SEND { index:${singleIndex}, len:${textLength} }`);
+        } else {
+          console.warn(`START:TEXT_SEND { index:${singleIndex}, len:${textLength}, sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
+        }
+      }
+
+      responses.push({ ...response, meta });
+
+      if (i < payloads.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    return { responses };
   }
 
   /**
@@ -808,143 +911,107 @@ class MessageService {
       const axios = require('axios');
       const apiUrl = `https://api.telegram.org/bot${botToken}`;
 
-      // CP-4: Se houver mídias em array (sendMediaGroup)
       if (payload.media && Array.isArray(payload.media) && payload.media.length > 0) {
         const response = await axios.post(`${apiUrl}/sendMediaGroup`, {
           chat_id: payload.chat_id,
           media: payload.media
         }, { timeout: 5000, validateStatus: () => true });
 
-        if (response.data.ok) {
-          console.info('[START:SEND:GROUP]', JSON.stringify({
-            count: payload.media.length,
-            sent: true,
-            timestamp: new Date().toISOString()
-          }));
+        if (response.data?.ok) {
           return {
             ok: true,
-            message_ids: response.data.result.map(m => m.message_id)
+            message_ids: response.data.result.map(item => item.message_id)
           };
         }
-        // CP-8: Logar erro 400 com body sanitizado
+
         const errorDesc = response.data?.description || 'Unknown error';
-        const sanitizedError = this._sanitizeTelegramError(errorDesc);
-        console.error('[START:SEND:GROUP:ERROR]', JSON.stringify({
-          count: payload.media.length,
-          status: response.status,
-          error: sanitizedError,
-          timestamp: new Date().toISOString()
-        }));
-        // Não quebrar fluxo; degradar gracefully
         return {
           ok: false,
-          error: sanitizedError
+          status: response.status,
+          error: this._sanitizeTelegramError(errorDesc)
         };
       }
 
-      // CP-5: Se houver mídia individual (photo/video/audio/document)
       const mediaFields = ['photo', 'video', 'audio', 'document'];
       for (const field of mediaFields) {
-        if (payload[field]) {
-          const method = `send${field.charAt(0).toUpperCase() + field.slice(1)}`;
-          const sendPayload = {
-            chat_id: payload.chat_id,
-            [field]: payload[field],
-            parse_mode: payload.parse_mode || 'HTML'
-          };
+        if (!payload[field]) {
+          continue;
+        }
 
-          // Adicionar caption se existir
-          if (payload.caption) {
-            sendPayload.caption = payload.caption;
-            sendPayload.parse_mode = payload.parse_mode || 'MarkdownV2';
-          }
+        const method = `send${field.charAt(0).toUpperCase() + field.slice(1)}`;
+        const sendPayload = {
+          chat_id: payload.chat_id,
+          [field]: payload[field]
+        };
 
-          // Adicionar botões se existirem
-          if (payload.reply_markup) {
-            sendPayload.reply_markup = payload.reply_markup;
-          }
+        if (payload.caption) {
+          sendPayload.caption = payload.caption;
+          sendPayload.parse_mode = payload.parse_mode || 'MarkdownV2';
+        } else if (payload.parse_mode) {
+          sendPayload.parse_mode = payload.parse_mode;
+        }
 
-          const response = await axios.post(`${apiUrl}/${method}`, sendPayload, { 
-            timeout: 5000,
-            validateStatus: () => true 
-          });
+        if (payload.reply_markup) {
+          sendPayload.reply_markup = payload.reply_markup;
+        }
 
-          if (response.data.ok) {
-            console.info('[START:SEND:SINGLE]', JSON.stringify({
-              kind: field,
-              sent: true,
-              timestamp: new Date().toISOString()
-            }));
-            return {
-              ok: true,
-              message_id: response.data.result.message_id
-            };
-          }
-          // CP-8: Logar erro 400 com body sanitizado
-          const errorDesc = response.data?.description || 'Unknown error';
-          const sanitizedError = this._sanitizeTelegramError(errorDesc);
-          console.error('[START:SEND:SINGLE:ERROR]', JSON.stringify({
-            kind: field,
-            status: response.status,
-            error: sanitizedError,
-            timestamp: new Date().toISOString()
-          }));
-          // Não quebrar fluxo; tentar próxima mídia ou degradar
+        const response = await axios.post(`${apiUrl}/${method}`, sendPayload, {
+          timeout: 5000,
+          validateStatus: () => true
+        });
+
+        if (response.data?.ok) {
           return {
-            ok: false,
-            error: sanitizedError
+            ok: true,
+            message_id: response.data.result.message_id
           };
         }
+
+        const errorDesc = response.data?.description || 'Unknown error';
+        return {
+          ok: false,
+          status: response.status,
+          error: this._sanitizeTelegramError(errorDesc)
+        };
       }
 
-      // CP-6: Caso contrário, enviar apenas texto
       if (!payload.text) {
-        throw new Error('Nenhum conteúdo para enviar (sem texto ou mídia)');
+        return { ok: false, error: 'Nenhum conteúdo para enviar (sem texto ou mídia)' };
       }
 
       const sendPayload = {
         chat_id: payload.chat_id,
-        text: payload.text,
-        parse_mode: payload.parse_mode || 'HTML'
+        text: payload.text
       };
 
-      // Adicionar botões se existirem
+      if (payload.parse_mode) {
+        sendPayload.parse_mode = payload.parse_mode;
+      }
+
       if (payload.reply_markup) {
         sendPayload.reply_markup = payload.reply_markup;
       }
 
-      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, { 
+      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, {
         timeout: 5000,
-        validateStatus: () => true 
+        validateStatus: () => true
       });
 
-      if (response.data.ok) {
-        console.info('[START:TEXT_SEND]', JSON.stringify({
-          len: payload.text.length,
-          timestamp: new Date().toISOString()
-        }));
+      if (response.data?.ok) {
         return {
           ok: true,
           message_id: response.data.result.message_id
         };
       }
 
-      // CP-8: Logar erro 400 com body sanitizado
       const errorDesc = response.data?.description || 'Unknown error';
-      const sanitizedError = this._sanitizeTelegramError(errorDesc);
-      console.error('[START:TEXT_SEND:ERROR]', JSON.stringify({
-        status: response.status,
-        error: sanitizedError,
-        timestamp: new Date().toISOString()
-      }));
-      // Não quebrar fluxo; retornar erro mas não lançar exceção
       return {
         ok: false,
-        error: sanitizedError
+        status: response.status,
+        error: this._sanitizeTelegramError(errorDesc)
       };
     } catch (error) {
-      console.error(`[ERRO][TELEGRAM_API] ${error.message}`);
-      throw error;
+      return { ok: false, error: error.message };
     }
   }
 }

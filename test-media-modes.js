@@ -185,7 +185,7 @@ const test1Medias = [
 ];
 const test1Decision = messageService.decideMediaMode('group', test1Medias);
 console.log(`✓ 1 foto com group → decided="${test1Decision.decided}" (esperado: single)`);
-console.log(`  Razão: ${test1Decision.reason}`);
+console.log(`  Elegíveis: ${test1Decision.eligiblePhotoVideo}`);
 
 // Teste 2: 2 mídias elegíveis → group
 const test2Medias = [
@@ -194,7 +194,7 @@ const test2Medias = [
 ];
 const test2Decision = messageService.decideMediaMode('group', test2Medias);
 console.log(`✓ 2 fotos/vídeos com group → decided="${test2Decision.decided}" (esperado: group)`);
-console.log(`  Razão: ${test2Decision.reason}`);
+console.log(`  Elegíveis: ${test2Decision.eligiblePhotoVideo}`);
 
 // Teste 3: Single solicitado → sempre single
 const test3Medias = [
@@ -203,7 +203,7 @@ const test3Medias = [
 ];
 const test3Decision = messageService.decideMediaMode('single', test3Medias);
 console.log(`✓ 2 fotos/vídeos com single → decided="${test3Decision.decided}" (esperado: single)`);
-console.log(`  Razão: ${test3Decision.reason}`);
+console.log(`  Elegíveis: ${test3Decision.eligiblePhotoVideo}`);
 
 // ============================================================================
 // VERIFICAÇÕES DE PRIORIZAÇÃO
