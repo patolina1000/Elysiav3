@@ -1,5 +1,6 @@
 let currentBotId = null;
 let currentConfig = null;
+let currentMediaMode = 'group'; // 'group' ou 'single'
 
 // Inicializar ao carregar a página
 document.addEventListener('DOMContentLoaded', () => {
@@ -67,7 +68,7 @@ function renderBotHeader() {
 function renderMessages(messages) {
   const container = document.getElementById('messagesList');
   
-  if (messages.length === 0) {
+  if (!messages || messages.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <p>Nenhuma mensagem configurada ainda.</p>
@@ -79,8 +80,16 @@ function renderMessages(messages) {
   
   let html = '';
   messages.forEach((message, index) => {
-    // Garantir que message é string (em caso de objeto legado)
-    const messageText = typeof message === 'string' ? message : (message?.text || String(message || ''));
+    // Normalizar message para string (nunca deixar objeto no textarea)
+    let messageText = '';
+    if (typeof message === 'string') {
+      messageText = message;
+    } else if (typeof message === 'object' && message !== null && message.text) {
+      messageText = String(message.text);
+    } else if (message !== null && message !== undefined) {
+      messageText = String(message);
+    }
+    
     const charCount = messageText.length;
     
     html += `
@@ -302,28 +311,65 @@ function showErrorState(message) {
   document.getElementById('errorMessage').textContent = message;
 }
 
+function updateMediaModeDisplay() {
+  const modeSelect = document.getElementById('mediaMode');
+  const helpText = document.getElementById('mediaModeHelp');
+  const mode = modeSelect.value;
+  
+  currentMediaMode = mode;
+  
+  if (mode === 'group') {
+    helpText.innerHTML = '<strong>Grupo:</strong> Fotos e vídeos são agrupados em um álbum. Áudios e documentos são enviados isoladamente.';
+  } else {
+    helpText.innerHTML = '<strong>Uma por vez:</strong> Todas as mídias são enviadas individualmente, respeitando a ordem: áudio > vídeo > foto.';
+  }
+}
+
 async function saveStartConfiguration() {
   try {
-    // Usar estado global currentMessages (não coletar do DOM)
-    const messages = currentMessages;
+    // Coletar mensagens do DOM (não usar estado global que pode estar desatualizado)
+    const messages = getCurrentMessages();
     
     if (!messages || messages.length === 0) {
       showAlert('Pelo menos uma mensagem é obrigatória', 'error');
       return;
     }
     
+    // Garantir que todas as mensagens são strings válidas (NUNCA objetos)
+    const validMessages = messages
+      .map(msg => {
+        if (typeof msg === 'string') return msg;
+        if (typeof msg === 'object' && msg !== null && msg.text) return String(msg.text);
+        if (msg === null || msg === undefined) return '';
+        return String(msg);
+      })
+      .filter(msg => msg && msg.trim()); // Remover vazias
+    
+    if (validMessages.length === 0) {
+      showAlert('Pelo menos uma mensagem é obrigatória', 'error');
+      return;
+    }
+
+    if (validMessages.length > 3) {
+      showAlert('Máximo 3 mensagens permitidas', 'error');
+      return;
+    }
+    
     // Coletar mídias (do estado global)
-    const medias = currentMedias;
+    const medias = currentMedias || [];
     
     // Coletar planos (do estado global)
-    const plans = currentPlans;
+    const plans = currentPlans || [];
     
-    console.log('[SAVE_START] Salvando:', { messages: messages.length, medias: medias.length, plans: plans.length });
+    // Coletar modo de envio de mídias
+    const mediaMode = document.getElementById('mediaMode').value || 'group';
+    
+    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode };
     
     const response = await fetch(`/api/admin/bots/${currentBotId}/config/start`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, medias, plans })
+      body: JSON.stringify(payload)
     });
 
     const result = await response.json();
@@ -345,19 +391,37 @@ async function saveStartConfiguration() {
 
 async function previewStartMessage() {
   try {
-    // Usar estado global currentMessages (não coletar do DOM)
-    const messages = currentMessages;
+    // Coletar mensagens do DOM (não usar estado global que pode estar desatualizado)
+    const messages = getCurrentMessages();
     
     if (!messages || messages.length === 0) {
       showAlert('Adicione pelo menos uma mensagem para fazer preview', 'error');
       return;
     }
     
-    // Coletar mídias e planos do estado global
-    const medias = currentMedias;
-    const plans = currentPlans;
+    // Garantir que todas as mensagens são strings válidas (NUNCA objetos)
+    const validMessages = messages
+      .map(msg => {
+        if (typeof msg === 'string') return msg;
+        if (typeof msg === 'object' && msg !== null && msg.text) return String(msg.text);
+        if (msg === null || msg === undefined) return '';
+        return String(msg);
+      })
+      .filter(msg => msg && msg.trim()); // Remover vazias
     
-    console.log('[PREVIEW] Enviando:', { messages: messages.length, medias: medias.length, plans: plans.length });
+    if (validMessages.length === 0) {
+      showAlert('Adicione pelo menos uma mensagem para fazer preview', 'error');
+      return;
+    }
+    
+    // Coletar mídias e planos do estado global
+    const medias = currentMedias || [];
+    const plans = currentPlans || [];
+    
+    // Coletar modo de envio de mídias
+    const mediaMode = document.getElementById('mediaMode').value || 'group';
+    
+    const payload = { messages: validMessages, medias, plans, media_mode: mediaMode };
     
     // Mostrar loading
     showAlert('Enviando preview para o grupo de aquecimento...', 'info');
@@ -365,7 +429,7 @@ async function previewStartMessage() {
     const response = await fetch(`/api/admin/bots/${currentBotId}/start/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, medias, plans })
+      body: JSON.stringify(payload)
     });
 
     const result = await response.json();
@@ -625,7 +689,11 @@ function updateCharCounter(textarea, index) {
 function getCurrentMessages() {
   const messages = [];
   document.querySelectorAll('#messagesList .config-item-card textarea').forEach(textarea => {
-    messages.push(textarea.value);
+    const value = textarea.value.trim();
+    // Garantir que apenas strings não-vazias são adicionadas
+    if (value) {
+      messages.push(value);
+    }
   });
   return messages;
 }
@@ -695,14 +763,17 @@ async function saveMedia(event) {
       return;
     }
     
-    // Adicionar mídia ao estado
+    // Adicionar mídia ao estado com shape canônico: { kind, key, caption }
+    // Campos adicionais (name, size, tg_file_id, warmup_status) são apenas para UI
     const media = {
-      type: type,
-      kind: type, // Usar 'kind' para compatibilidade com backend
+      // Shape canônico para backend
+      kind: type,
+      key: result.data.media_key, // sha256 ou identificador único
+      caption: caption || '',
+      
+      // Campos adicionais para UI
       name: file.name,
       size: file.size,
-      caption: caption || null,
-      media_key: result.data.media_key,
       tg_file_id: result.data.tg_file_id || null,
       warmup_status: result.data.warmup_status || 'pending'
     };
@@ -831,16 +902,26 @@ function initializeStartConfig(startConfig) {
     currentMessages = [];
     currentMedias = [];
     currentPlans = [];
+    currentMediaMode = 'group';
     return;
   }
 
-  // Garantir que messages é sempre um array de strings
+  // Garantir que messages é sempre um array de strings (NUNCA objetos)
   if (Array.isArray(startConfig.messages)) {
-    currentMessages = startConfig.messages.map(msg => {
-      if (typeof msg === 'string') return msg;
-      if (typeof msg === 'object' && msg.text) return msg.text;
-      return String(msg);
-    });
+    currentMessages = startConfig.messages
+      .map(msg => {
+        // Converter qualquer coisa para string
+        if (typeof msg === 'string') return msg;
+        if (typeof msg === 'object' && msg !== null && msg.text) return String(msg.text);
+        if (msg === null || msg === undefined) return '';
+        return String(msg);
+      })
+      .filter(msg => msg && msg.trim()); // Remover vazias
+  } else if (startConfig.text_messages && Array.isArray(startConfig.text_messages)) {
+    // Suporte a formato alternativo
+    currentMessages = startConfig.text_messages
+      .map(msg => typeof msg === 'string' ? msg : String(msg || ''))
+      .filter(msg => msg && msg.trim());
   } else {
     currentMessages = [];
   }
@@ -858,6 +939,9 @@ function initializeStartConfig(startConfig) {
 
   // Garantir que plans é um array
   currentPlans = Array.isArray(startConfig.plans) ? startConfig.plans : [];
+  
+  // Carregar media_mode (padrão: 'group' para retrocompatibilidade)
+  currentMediaMode = startConfig.media_mode || 'group';
 }
 
 // Atualizar função renderStartMessage para inicializar estados
@@ -873,4 +957,11 @@ function renderStartMessage() {
   
   // Renderizar planos
   renderPlans(currentPlans);
+  
+  // Restaurar media_mode no seletor
+  const mediaModeSelect = document.getElementById('mediaMode');
+  if (mediaModeSelect) {
+    mediaModeSelect.value = currentMediaMode;
+    updateMediaModeDisplay();
+  }
 }

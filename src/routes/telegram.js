@@ -36,20 +36,34 @@ router.post('/:slug/webhook', async (req, res) => {
     const fromId = update.message?.from?.id || update.callback_query?.from?.id || null;
     const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || null;
 
-    console.info('[WEBHOOK][RECEIVED]', JSON.stringify({
+    console.info('[WEBHOOK:RECEIVED]', JSON.stringify({
       slug,
       updateType,
       fromId,
       chatId,
-      hasSecret: Boolean(req.headers['x-telegram-bot-api-secret-token'])
+      hasSecret: Boolean(req.headers['x-telegram-bot-api-secret-token']),
+      timestamp: new Date().toISOString()
     }));
 
     // 1. Validar que o bot existe
     const bot = await req.botEngine.getBotBySlug(slug);
     if (!bot) {
-      console.warn(`[WEBHOOK] Bot não encontrado: slug=${slug}`);
+      console.warn('[WEBHOOK:BOT_NOT_FOUND]', JSON.stringify({
+        slug,
+        reason: 'bot_not_in_database',
+        timestamp: new Date().toISOString()
+      }));
       return res.status(200).json({ ok: true });
     }
+
+    console.info('[WEBHOOK:BOT_FOUND]', JSON.stringify({
+      slug,
+      botId: bot.id,
+      botName: bot.name,
+      active: bot.active,
+      tokenStatus: bot.token_status,
+      timestamp: new Date().toISOString()
+    }));
 
     // 2. Normalizar update do Telegram
     const normalizedEvent = req.botEngine.normalizeUpdate(update);
@@ -94,6 +108,14 @@ router.post('/:slug/webhook', async (req, res) => {
 
         // 4. Registrar evento de funil e enviar resposta
         if (command === '/start') {
+          console.info('[START:COMMAND_DETECTED]', JSON.stringify({
+            slug,
+            botId: bot.id,
+            telegramId,
+            botUserId,
+            timestamp: new Date().toISOString()
+          }));
+
           // Registrar bot_start
           try {
             await req.pool.query(
@@ -101,8 +123,20 @@ router.post('/:slug/webhook', async (req, res) => {
                VALUES ($1, $2, $3, $4, NOW())`,
               ['bot_start', bot.id, botUserId, telegramId]
             );
+            console.info('[START:EVENT_REGISTERED]', JSON.stringify({
+              slug,
+              botId: bot.id,
+              telegramId,
+              eventName: 'bot_start'
+            }));
           } catch (dbError) {
-            console.error(`[ERRO][WEBHOOK][BOT_START_EVENT] bot=${slug} user=${telegramId} error=${dbError.message}`);
+            console.error('[ERRO:START:EVENT_REGISTER]', JSON.stringify({
+              slug,
+              botId: bot.id,
+              telegramId,
+              error: dbError.message,
+              code: dbError.code
+            }));
           }
 
           // Atualizar last_start_at
@@ -118,17 +152,28 @@ router.post('/:slug/webhook', async (req, res) => {
           // Descriptografar token para envio
           const botToken = bot.token_encrypted ? crypto.decrypt(bot.token_encrypted) : null;
 
+          if (!botToken) {
+            console.warn('[START:NO_TOKEN]', JSON.stringify({
+              slug,
+              botId: bot.id,
+              reason: 'token_encrypted_is_null_or_decrypt_failed'
+            }));
+          }
+
           const context = {
             userName: 'Usuário',
             botName: bot.name || 'Bot',
             userId: telegramId
           };
 
-          console.info('[START][PROCESS]', JSON.stringify({
+          console.info('[START:SENDING]', JSON.stringify({
             slug,
             botId: bot.id,
             telegramId,
-            botUserId
+            botUserId,
+            hasToken: Boolean(botToken),
+            contextKeys: Object.keys(context),
+            timestamp: new Date().toISOString()
           }));
 
           // Enviar mensagem via Telegram API
@@ -141,9 +186,24 @@ router.post('/:slug/webhook', async (req, res) => {
           );
 
           if (sendResult.success) {
-            console.log(`[WEBHOOK][START] bot=${slug} user=${telegramId} sent=true latency=${sendResult.duration}ms`);
+            console.info('[START:SUCCESS]', JSON.stringify({
+              slug,
+              botId: bot.id,
+              telegramId,
+              latencyMs: sendResult.duration,
+              messageCount: sendResult.messageCount,
+              mediaCount: sendResult.mediaCount,
+              timestamp: new Date().toISOString()
+            }));
           } else {
-            console.warn(`[WEBHOOK][START] bot=${slug} user=${telegramId} error=${sendResult.error}`);
+            console.warn('[START:FAILED]', JSON.stringify({
+              slug,
+              botId: bot.id,
+              telegramId,
+              error: sendResult.error,
+              latencyMs: sendResult.duration,
+              timestamp: new Date().toISOString()
+            }));
           }
         } else if (normalizedEvent.type === 'message') {
           // Registrar bot_interaction

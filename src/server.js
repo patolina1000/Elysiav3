@@ -13,6 +13,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const multer = require('multer');
 const { pool } = require('./db'); // Usar módulo centralizado de banco de dados
 const config = require('./config');
 
@@ -44,6 +45,14 @@ const botService = new BotService(pool, botEngine);
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Para FormData
+
+// Configurar multer para upload de mídias em memória
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+});
+
 app.use(express.static('public')); // Servir arquivos estáticos (frontend)
 
 // Middleware de logging simples
@@ -80,6 +89,16 @@ app.use('/tg', telegramRouter);
 app.use('/api/payments', paymentsRouter);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/admin/bots', adminBotsRouter);
+
+// Middleware de upload para rota de media/upload
+app.post('/api/admin/bots/:id/media/upload', upload.single('file'), (req, res, next) => {
+  // Converter arquivo para req.body.file para compatibilidade com rota
+  if (req.file) {
+    req.body.file = req.file.buffer;
+  }
+  next();
+});
+
 app.use('/api/admin/bots', adminBotConfigRouter); // Config detalhada de bots
 app.use('/api/admin/bots', adminMediaRouter); // Upload de mídia com warmup
 app.use('/api/ngrok', ngrokWebhooksRouter); // Gerenciamento de webhooks ngrok

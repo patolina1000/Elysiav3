@@ -640,6 +640,19 @@
                 <h3 class="config-section-title">Mídias (máx. 3)</h3>
                 <button type="button" id="addMediaBtn" class="btn-secondary btn-small" onclick="addMedia()">+ Adicionar mídia</button>
               </div>
+              
+              <!-- Modo de envio de mídias -->
+              <div class="form-group" style="margin-bottom: 20px;">
+                <label for="mediaMode">Modo de envio de mídias</label>
+                <select id="mediaMode" name="media_mode" onchange="updateMediaModeDisplay()">
+                  <option value="group">📦 Grupo (álbum) - Padrão</option>
+                  <option value="single">📤 Uma por vez</option>
+                </select>
+                <small id="mediaModeHelp" style="display: block; margin-top: 8px; color: var(--text-tertiary);">
+                  <strong>Grupo:</strong> Fotos e vídeos são agrupados em um álbum. Áudios e documentos são enviados isoladamente.
+                </small>
+              </div>
+              
               <div id="mediasList" class="config-items-list">
                 <div class="empty-state">
                   <p>Nenhuma mídia configurada ainda.</p>

@@ -27,10 +27,13 @@
  * }
  */
 
+const MediaResolver = require('./media-resolver');
+
 class MessageService {
   constructor(pool, config = {}) {
     this.pool = pool;
     this.config = config;
+    this.mediaResolver = new MediaResolver(pool, config);
   }
 
   /**
@@ -96,36 +99,36 @@ class MessageService {
   async getMessageTemplate(botId, messageType) {
     try {
       let result;
+      let query;
+      let params;
 
       if (messageType === 'start') {
-        // Buscar em bot_messages com slug='start'
-        result = await this.pool.query(
-          `SELECT id, bot_id, slug, content, active, created_at, updated_at 
-           FROM bot_messages 
-           WHERE bot_id = $1 AND slug = $2 AND active = TRUE 
-           LIMIT 1`,
-          [botId, 'start']
-        );
+        // Buscar em bot_messages com slug='start' - fonte única
+        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
+                 FROM bot_messages 
+                 WHERE bot_id = $1 AND slug = $2 AND active = TRUE 
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1`;
+        params = [botId, 'start'];
+        result = await this.pool.query(query, params);
       } else if (messageType === 'downsell') {
         // Buscar em bot_downsells (primeira disponível)
-        result = await this.pool.query(
-          `SELECT id, bot_id, slug, content, active, created_at, updated_at 
-           FROM bot_downsells 
-           WHERE bot_id = $1 AND active = TRUE 
-           ORDER BY delay_seconds ASC
-           LIMIT 1`,
-          [botId]
-        );
+        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
+                 FROM bot_downsells 
+                 WHERE bot_id = $1 AND active = TRUE 
+                 ORDER BY delay_seconds ASC
+                 LIMIT 1`;
+        params = [botId];
+        result = await this.pool.query(query, params);
       } else if (messageType === 'shot') {
         // Buscar em shots (primeira disponível)
-        result = await this.pool.query(
-          `SELECT id, bot_id, slug, content, active, created_at, updated_at 
-           FROM shots 
-           WHERE bot_id = $1 AND active = TRUE 
-           ORDER BY created_at DESC
-           LIMIT 1`,
-          [botId]
-        );
+        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
+                 FROM shots 
+                 WHERE bot_id = $1 AND active = TRUE 
+                 ORDER BY created_at DESC
+                 LIMIT 1`;
+        params = [botId];
+        result = await this.pool.query(query, params);
       } else {
         console.warn(`[MESSAGE] Tipo de mensagem desconhecido: type=${messageType}`);
         return null;
@@ -133,12 +136,7 @@ class MessageService {
 
       if (result.rows.length === 0) {
         if (messageType === 'start') {
-          console.warn('[START][LOAD_CONFIG]', JSON.stringify({
-            botId,
-            type: messageType,
-            found: false,
-            reason: 'template_not_found_active'
-          }));
+          console.warn('[START:TEMPLATE:NOT_FOUND]', JSON.stringify({ botId }));
         } else {
           console.warn(`[MESSAGE] Template não encontrado: bot=${botId} type=${messageType}`);
         }
@@ -148,32 +146,17 @@ class MessageService {
       const row = result.rows[0];
       // Normalizar content para JSON
       row.content = this.normalizeContent(row.content);
-      if (messageType === 'start') {
-        const messageCount = Array.isArray(row.content.messages)
-          ? row.content.messages.length
-          : row.content.text
-            ? 1
-            : 0;
-        const mediasCount = Array.isArray(row.content.medias) ? row.content.medias.length : 0;
-        console.info('[START][LOAD_CONFIG]', JSON.stringify({
-          botId,
-          type: messageType,
-          found: true,
-          messageId: row.id,
-          messageCount,
-          mediasCount,
-          active: row.active !== false
-        }));
-      }
       return row;
     } catch (error) {
       if (messageType === 'start') {
-        console.error('[START][LOAD_CONFIG]', JSON.stringify({
+        console.error('[ERRO:START:TEMPLATE_QUERY]', JSON.stringify({
           botId,
           type: messageType,
           found: false,
           reason: 'exception',
-          error: error.message
+          error: error.message,
+          code: error.code,
+          timestamp: new Date().toISOString()
         }));
       } else {
         console.error(`[ERRO][MESSAGE] Falha ao buscar template: bot=${botId} type=${messageType} error=${error.message}`);
@@ -190,9 +173,10 @@ class MessageService {
    * {
    *   id: number,
    *   kind: 'photo' | 'video' | 'audio',
-   *   file_id: string (Telegram file_id se em cache),
+   *   tg_file_id: string (Telegram file_id se em cache),
    *   url: string (URL da mídia se não em cache),
-   *   media_store_id: number
+   *   media_store_id: number,
+   *   caption: string (opcional)
    * }
    */
   async getMessageMedia(messageId, limit = 3) {
@@ -202,7 +186,7 @@ class MessageService {
       // Por enquanto, retornar array vazio até que a tabela seja criada
       
       // TODO: Implementar quando tabela message_media for criada
-      // SELECT mc.id, mc.kind, mc.file_id, ms.url, ms.id as media_store_id
+      // SELECT mc.id, mc.kind, mc.tg_file_id, ms.url, ms.id as media_store_id
       // FROM message_media mm
       // JOIN media_cache mc ON mm.media_cache_id = mc.id
       // LEFT JOIN media_store ms ON mc.media_store_id = ms.id
@@ -224,8 +208,6 @@ class MessageService {
   renderContent(template, context = {}) {
     const contentObj = this.normalizeContent(template.content);
     
-    console.log(`[MESSAGE_SERVICE][RENDER] contentObj keys:`, Object.keys(contentObj));
-    
     // Substituições simples (aplicar a todas as mensagens)
     const placeholders = {
       '{{user_name}}': context.userName || 'Usuário',
@@ -237,7 +219,6 @@ class MessageService {
     const replaceText = (text) => {
       // Garantir que text é sempre string
       if (typeof text !== 'string') {
-        console.warn(`[MESSAGE_SERVICE][RENDER] Texto não é string, convertendo:`, typeof text, text);
         text = String(text);
       }
       
@@ -263,8 +244,6 @@ class MessageService {
         })
         .filter(msg => msg && msg.trim()); // Remover mensagens vazias
       
-      console.log(`[MESSAGE_SERVICE][RENDER] Usando novo formato (messages array), ${messages.length} mensagens`);
-      
       return {
         messages,
         media_ids: contentObj.media_ids || [],
@@ -274,7 +253,6 @@ class MessageService {
     } else if (contentObj.text) {
       // Formato antigo: usar campo text direto
       const text = replaceText(String(contentObj.text));
-      console.log(`[MESSAGE_SERVICE][RENDER] Usando formato antigo (text field), text length: ${text.length}`);
       
       return {
         text,
@@ -283,7 +261,6 @@ class MessageService {
         medias: contentObj.medias || []
       };
     } else {
-      console.warn(`[MESSAGE_SERVICE][RENDER] Nenhum texto encontrado em contentObj`);
       return {
         text: '',
         media_ids: [],
@@ -299,7 +276,7 @@ class MessageService {
    * 
    * Fluxo:
    * 1. Buscar template
-   * 2. Buscar mídias
+   * 2. Resolver mídias via MediaResolver
    * 3. Renderizar conteúdo (suporta múltiplas mensagens)
    * 4. Preparar payloads para Telegram
    * 5. Enviar via Telegram API (todas as mensagens)
@@ -314,50 +291,67 @@ class MessageService {
     const startTime = Date.now();
 
     try {
-      if (messageType === 'start') {
-        console.info('[START][RESOLVE]', JSON.stringify({
-          botId,
-          telegramId,
-          contextKeys: Object.keys(context || {})
-        }));
-      }
       // 1. Buscar template
       const template = await this.getMessageTemplate(botId, messageType);
       if (!template) {
         throw new Error(`Template não encontrado: type=${messageType}`);
       }
 
-      // 2. Buscar mídias
-      const medias = await this.getMessageMedia(template.id, 3);
+      // 2. Resolver mídias via MediaResolver (em vez de getMessageMedia)
+      // Primeiro, buscar bot_slug para resolver mídias
+      const botResult = await this.pool.query(
+        'SELECT slug FROM bots WHERE id = $1',
+        [botId]
+      );
+      
+      let medias = [];
+      if (botResult.rows.length > 0) {
+        const botSlug = botResult.rows[0].slug;
+        const mediasInConfig = template.content.medias || [];
+        medias = await this.mediaResolver.resolveMedias(botSlug, mediasInConfig);
+      }
 
       // 3. Renderizar conteúdo (retorna todas as mensagens)
       const renderedContent = this.renderContent(template, context);
 
+      // CP-1: Normalizar media_mode e attach_text_as_caption
+      // Se ausentes, usar defaults: media_mode='group', attach_text_as_caption=false
+      let mediaMode = template.content?.media_mode || 'group';
+      let attachTextAsCaption = template.content?.attach_text_as_caption;
+      
+      // Validar media_mode (aceitar apenas 'group' ou 'single')
+      if (mediaMode !== 'group' && mediaMode !== 'single') {
+        mediaMode = 'group';
+      }
+      
+      // Normalizar attach_text_as_caption (default: false se ausente)
+      if (attachTextAsCaption === undefined || attachTextAsCaption === null) {
+        attachTextAsCaption = false;
+      } else {
+        attachTextAsCaption = Boolean(attachTextAsCaption);
+      }
+      
+      if (messageType === 'start') {
+        console.info('[START:CONFIG_NORMALIZED]', JSON.stringify({
+          botId,
+          mediaMode,
+          attachTextAsCaption,
+          timestamp: new Date().toISOString()
+        }));
+      }
+
       // 4. Preparar payloads para Telegram (um por mensagem)
-      const payloads = this.prepareTelegramPayloads(telegramId, renderedContent, medias);
+      const payloads = this.prepareTelegramPayloads(telegramId, renderedContent, medias, mediaMode, attachTextAsCaption);
 
       if (!payloads || payloads.length === 0) {
         throw new Error(`Nenhum payload para enviar`);
       }
 
-      if (messageType === 'start') {
-        console.info('[START][DECISION]', JSON.stringify({
-          botId,
-          telegramId,
-          path: 'custom',
-          reason: 'ok',
-          payloads: payloads.length,
-          medias: medias.length
-        }));
-      }
-
       // 5. Enviar via Telegram API (se botToken fornecido)
       let responses = [];
       if (botToken) {
-        console.log(`[MESSAGE_SERVICE][DEBUG] Enviando ${payloads.length} mensagem(ns) para Telegram: chat_id=${telegramId}`);
         for (let i = 0; i < payloads.length; i++) {
           const payload = payloads[i];
-          console.log(`[MESSAGE_SERVICE][DEBUG] Mensagem ${i + 1}/${payloads.length}: text_length=${payload.text?.length || 0}`);
           try {
             const response = await this.sendViaTelegramAPI(botToken, payload);
             responses.push(response);
@@ -366,12 +360,9 @@ class MessageService {
               await new Promise(resolve => setTimeout(resolve, 100));
             }
           } catch (sendError) {
-            console.error(`[ERRO][MESSAGE_SERVICE][SEND] Mensagem ${i + 1} falhou: ${sendError.message}`);
             // Continuar tentando enviar as próximas mensagens
           }
         }
-      } else {
-        console.warn(`[MESSAGE_SERVICE][WARN] Bot token não fornecido, pulando envio via Telegram`);
       }
 
       // 6. Registrar em funnel_events
@@ -383,13 +374,36 @@ class MessageService {
              VALUES ($1, $2, $3, $4, NOW())`,
             [eventName, botId, telegramId, JSON.stringify({ type: messageType, messages: payloads.length, medias: medias.length })]
           );
+          console.info('[START:FUNNEL_EVENT_REGISTERED]', JSON.stringify({
+            botId,
+            telegramId,
+            eventName,
+            timestamp: new Date().toISOString()
+          }));
         } catch (dbError) {
-          console.error(`[ERRO][MESSAGE_SERVICE][FUNNEL_EVENT] event=${eventName} bot=${botId} user=${telegramId} error=${dbError.message}`);
+          console.error('[ERRO:START:FUNNEL_EVENT]', JSON.stringify({
+            botId,
+            telegramId,
+            eventName,
+            error: dbError.message,
+            code: dbError.code,
+            timestamp: new Date().toISOString()
+          }));
         }
       }
 
       const duration = Date.now() - startTime;
-      console.log(`[BOT][MESSAGE] type=${messageType} user=${telegramId} messages=${payloads.length} medias=${medias.length} latency=${duration}ms sent=${responses.length > 0}`);
+      console.info('[START:COMPLETE]', JSON.stringify({
+        botId,
+        telegramId,
+        messageType,
+        payloadCount: payloads.length,
+        mediaCount: medias.length,
+        sentCount: responses.length,
+        latencyMs: duration,
+        success: responses.length > 0,
+        timestamp: new Date().toISOString()
+      }));
 
       return {
         success: responses.length > 0,
@@ -402,15 +416,23 @@ class MessageService {
     } catch (error) {
       const duration = Date.now() - startTime;
       if (messageType === 'start') {
-        console.warn('[START][DECISION]', JSON.stringify({
+        console.warn('[START:FAILED]', JSON.stringify({
           botId,
           telegramId,
-          path: 'fallback',
           reason: error.message,
-          latencyMs: duration
+          latencyMs: duration,
+          stack: error.stack?.split('\n')[0],
+          timestamp: new Date().toISOString()
         }));
       }
-      console.error(`[ERRO][MESSAGE] type=${messageType} user=${telegramId} error=${error.message} latency=${duration}ms`);
+      console.error('[ERRO:MESSAGE_SERVICE]', JSON.stringify({
+        type: messageType,
+        botId,
+        telegramId,
+        error: error.message,
+        latencyMs: duration,
+        timestamp: new Date().toISOString()
+      }));
       return {
         success: false,
         error: error.message,
@@ -432,13 +454,86 @@ class MessageService {
   }
 
   /**
+   * Ordenar mídias por prioridade: áudio > vídeo > foto
+   * Mantém ordem original dentro de cada tipo
+   */
+  prioritizeMedias(medias = []) {
+    const priorityMap = {
+      'audio': 0,
+      'video': 1,
+      'photo': 2,
+      'document': 3
+    };
+
+    const sorted = [...medias].sort((a, b) => {
+      const priorityA = priorityMap[a.kind] !== undefined ? priorityMap[a.kind] : 99;
+      const priorityB = priorityMap[b.kind] !== undefined ? priorityMap[b.kind] : 99;
+      return priorityA - priorityB;
+    });
+
+    return sorted;
+  }
+
+  /**
+   * CP-2: Decidir rigidamente entre group/single baseado em elegibilidade
+   * group: apenas se media_mode==='group' E existem ≥2 mídias elegíveis (foto/vídeo com tg_file_id)
+   * Caso contrário: single
+   * 
+   * @param {string} requestedMode - 'group' ou 'single' (do template)
+   * @param {array} medias - array de mídias resolvidas
+   * @returns {object} { decided: 'group'|'single', reason: string }
+   */
+  decideMediaMode(requestedMode, medias = []) {
+    // Contar mídias elegíveis para group (foto/vídeo com tg_file_id)
+    const elegibleForGroup = medias.filter(m => 
+      ['photo', 'video'].includes(m.kind) && m.tg_file_id
+    ).length;
+
+    // Decidir rigidamente
+    const decided = (requestedMode === 'group' && elegibleForGroup >= 2) ? 'group' : 'single';
+    const reason = requestedMode === 'group' 
+      ? (elegibleForGroup >= 2 ? `group_eligible_${elegibleForGroup}_medias` : `single_fallback_only_${elegibleForGroup}_elegible`)
+      : 'single_requested';
+
+    return { decided, reason };
+  }
+
+  /**
    * Preparar múltiplos payloads para Telegram API
    * Um payload por mensagem (suporta até 3 mensagens)
    * Mídias são anexadas apenas à primeira mensagem
-   * renderedContent: { text, media_ids, buttons, medias }
+   * renderedContent: { text, media_ids, buttons, medias, media_mode }
+   * media_mode: 'group' (álbum) ou 'single' (individual)
+   * attachTextAsCaption: se true, usar primeiro texto como caption do primeiro item
    */
-  prepareTelegramPayloads(telegramId, renderedContent, medias = []) {
+  prepareTelegramPayloads(telegramId, renderedContent, medias = [], mediaMode = 'group', attachTextAsCaption = false) {
     const payloads = [];
+    
+    // Priorizar mídias: áudio > vídeo > foto
+    const prioritizedMedias = this.prioritizeMedias(medias);
+    
+    // CP-2: Decidir rigidamente entre group/single baseado em elegibilidade
+    const modeDecision = this.decideMediaMode(mediaMode, prioritizedMedias);
+    const decidedMode = modeDecision.decided;
+    
+    console.info('[START:MEDIA_MODE]', JSON.stringify({
+      requested: mediaMode,
+      decided: decidedMode,
+      reason: modeDecision.reason,
+      mediaCount: prioritizedMedias.length,
+      timestamp: new Date().toISOString()
+    }));
+
+    // Logar ordem de priorização
+    if (prioritizedMedias.length > 0) {
+      const order = prioritizedMedias.map(m => m.kind);
+      console.info('[START:MEDIA_ORDER]', JSON.stringify({
+        before: medias.length,
+        after_sorted: prioritizedMedias.length,
+        order: order,
+        timestamp: new Date().toISOString()
+      }));
+    }
     
     // Se houver array de mensagens, criar um payload por mensagem
     if (renderedContent.messages && Array.isArray(renderedContent.messages)) {
@@ -448,7 +543,6 @@ class MessageService {
         const trimmedText = (text || '').trim();
         
         if (!trimmedText) {
-          console.warn(`[MESSAGE_SERVICE] Pulando mensagem vazia no índice ${index}`);
           return;
         }
         
@@ -459,13 +553,85 @@ class MessageService {
         };
         
         // Anexar mídias apenas à primeira mensagem
-        if (index === 0 && medias.length > 0) {
-          payload.media = medias.slice(0, 3).map((media, mediaIndex) => ({
-            type: this.mapMediaKindToTelegramType(media.kind),
-            media: media.file_id || media.url,
-            caption: mediaIndex === 0 ? trimmedText : undefined,
-            parse_mode: 'MarkdownV2'
-          }));
+        if (index === 0 && prioritizedMedias.length > 0) {
+          // Filtrar mídias que têm tg_file_id (nunca enviar URL diretamente)
+          const validMedias = prioritizedMedias.filter(media => media.tg_file_id);
+          
+          if (validMedias.length > 0) {
+            if (decidedMode === 'group') {
+              // Modo grupo: agrupar fotos e vídeos em álbum, enviar áudios isoladamente
+              const groupableMedias = validMedias.filter(m => ['photo', 'video'].includes(m.kind));
+              const isolatedMedias = validMedias.filter(m => !['photo', 'video'].includes(m.kind));
+              
+              if (groupableMedias.length > 0) {
+                // Criar payload de álbum (máximo 10 itens)
+                // CP-1: Respeitar attachTextAsCaption - só adicionar caption se true
+                payload.media = groupableMedias.slice(0, 10).map((media, mediaIndex) => ({
+                  type: this.mapMediaKindToTelegramType(media.kind),
+                  media: media.tg_file_id,
+                  caption: (mediaIndex === 0 && attachTextAsCaption) ? trimmedText : undefined,
+                  parse_mode: 'MarkdownV2'
+                }));
+                
+                console.info('[START:MEDIA_GROUP:SEND]', JSON.stringify({
+                  items: groupableMedias.length,
+                  sent: true,
+                  reason: 'group_mode',
+                  timestamp: new Date().toISOString()
+                }));
+              }
+              
+              // Mídias isoladas (áudio, documento) serão enviadas em payloads separados
+              isolatedMedias.forEach((media, isolatedIndex) => {
+                const isolatedPayload = {
+                  chat_id: telegramId,
+                  parse_mode: 'MarkdownV2'
+                };
+                
+                const mediaType = this.mapMediaKindToTelegramType(media.kind);
+                isolatedPayload[mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : 'photo'] = media.tg_file_id;
+                
+                if (isolatedIndex === 0 && !payload.media) {
+                  // Se não houver álbum, adicionar caption ao primeiro isolado
+                  isolatedPayload.caption = trimmedText;
+                }
+                
+                payloads.push(isolatedPayload);
+                
+                console.info('[START:MEDIA_SINGLE:SEND]', JSON.stringify({
+                  index: isolatedIndex,
+                  kind: media.kind,
+                  sent: true,
+                  timestamp: new Date().toISOString()
+                }));
+              });
+            } else {
+              // Modo single: enviar cada mídia individualmente
+              validMedias.forEach((media, mediaIndex) => {
+                const singlePayload = {
+                  chat_id: telegramId,
+                  parse_mode: 'MarkdownV2'
+                };
+                
+                const mediaType = this.mapMediaKindToTelegramType(media.kind);
+                singlePayload[mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : mediaType === 'video' ? 'video' : 'photo'] = media.tg_file_id;
+                
+                // CP-1: Respeitar attachTextAsCaption - só adicionar caption ao primeiro se true
+                if (mediaIndex === 0 && attachTextAsCaption) {
+                  singlePayload.caption = trimmedText;
+                }
+                
+                payloads.push(singlePayload);
+                
+                console.info('[START:MEDIA_SINGLE:SEND]', JSON.stringify({
+                  index: mediaIndex,
+                  kind: media.kind,
+                  sent: true,
+                  timestamp: new Date().toISOString()
+                }));
+              });
+            }
+          }
         }
         
         // Anexar botões apenas à primeira mensagem
@@ -480,11 +646,12 @@ class MessageService {
           };
         }
         
+        // Sempre adicionar payload de texto (com ou sem mídias)
         payloads.push(payload);
       });
     } else {
       // Fallback: usar o método antigo de um único payload
-      const payload = this.prepareTelegramPayload(telegramId, renderedContent, medias);
+      const payload = this.prepareTelegramPayload(telegramId, renderedContent, prioritizedMedias, mediaMode, attachTextAsCaption);
       if (payload) {
         payloads.push(payload);
       }
@@ -497,8 +664,12 @@ class MessageService {
    * Preparar payload para Telegram API
    * Suporta texto + até 3 mídias
    * renderedContent: { text, media_ids, buttons, medias }
+   * mediaMode: 'group' (álbum) ou 'single' (individual)
+   * attachTextAsCaption: se true, usar texto como caption do primeiro item
+   * 
+   * IMPORTANTE: Nunca enviar URL diretamente. Só usar tg_file_id.
    */
-  prepareTelegramPayload(telegramId, renderedContent, medias = []) {
+  prepareTelegramPayload(telegramId, renderedContent, medias = [], mediaMode = 'group', attachTextAsCaption = false) {
     // Garantir que text é string
     const textValue = renderedContent.text || '';
     const text = typeof textValue === 'string' ? textValue : String(textValue);
@@ -522,14 +693,36 @@ class MessageService {
 
     // Se houver mídia, preparar para envio
     if (medias.length > 0) {
-      // Telegram permite enviar múltiplas mídias via media_group
-      // Aqui preparamos a estrutura
-      payload.media = medias.slice(0, 3).map((media, index) => ({
-        type: this.mapMediaKindToTelegramType(media.kind),
-        media: media.file_id || media.url,
-        caption: index === 0 && trimmedText ? trimmedText : undefined,
-        parse_mode: trimmedText ? 'MarkdownV2' : undefined
-      }));
+      // Filtrar mídias que têm tg_file_id (nunca enviar URL)
+      const validMedias = medias.filter(media => media.tg_file_id);
+      
+      if (validMedias.length > 0) {
+        if (mediaMode === 'group') {
+          // Modo grupo: agrupar fotos e vídeos
+          const groupableMedias = validMedias.filter(m => ['photo', 'video'].includes(m.kind));
+          
+          if (groupableMedias.length > 0) {
+            // Telegram permite enviar múltiplas mídias via media_group
+            // CP-1: Respeitar attachTextAsCaption
+            payload.media = groupableMedias.slice(0, 10).map((media, index) => ({
+              type: this.mapMediaKindToTelegramType(media.kind),
+              media: media.tg_file_id,
+              caption: index === 0 && attachTextAsCaption && trimmedText ? trimmedText : undefined,
+              parse_mode: (index === 0 && attachTextAsCaption && trimmedText) ? 'MarkdownV2' : undefined
+            }));
+          }
+        } else {
+          // Modo single: enviar primeira mídia apenas
+          const firstMedia = validMedias[0];
+          const mediaType = this.mapMediaKindToTelegramType(firstMedia.kind);
+          payload[mediaType === 'audio' ? 'audio' : mediaType === 'document' ? 'document' : mediaType === 'video' ? 'video' : 'photo'] = firstMedia.tg_file_id;
+          
+          // CP-1: Respeitar attachTextAsCaption
+          if (attachTextAsCaption && trimmedText) {
+            payload.caption = trimmedText;
+          }
+        }
+      }
     }
 
     // Se houver botões, adicionar ao payload
@@ -562,8 +755,45 @@ class MessageService {
   }
 
   /**
+   * CP-8: Sanitizar mensagens de erro do Telegram
+   * Identifica erros comuns e retorna descrição legível
+   */
+  _sanitizeTelegramError(errorDesc) {
+    if (!errorDesc) return 'Unknown error';
+
+    // Mapeamento de erros comuns do Telegram
+    const errorMap = {
+      'chat not found': 'Chat não encontrado (warmup_chat_id incorreto)',
+      'not enough rights': 'Bot sem permissão no grupo',
+      'wrong file_id': 'File ID inválido ou expirado',
+      'failed to get HTTP URL content': 'URL inacessível ou inválida',
+      'Bad Request': 'Requisição inválida ao Telegram',
+      'Unauthorized': 'Token do bot inválido',
+      'Forbidden': 'Bot bloqueado ou sem permissão',
+      'Not Found': 'Recurso não encontrado',
+      'Conflict': 'Conflito na operação',
+      'Internal Server Error': 'Erro interno do Telegram'
+    };
+
+    // Procurar por padrões conhecidos
+    for (const [pattern, friendlyMsg] of Object.entries(errorMap)) {
+      if (errorDesc.toLowerCase().includes(pattern.toLowerCase())) {
+        return friendlyMsg;
+      }
+    }
+
+    // Se não encontrar padrão, retornar os primeiros 100 caracteres
+    return errorDesc.substring(0, 100);
+  }
+
+  /**
    * Enviar via Telegram API
-   * Suporta texto simples e media groups
+   * Suporta:
+   * - sendMediaGroup (payload.media array)
+   * - sendPhoto/sendVideo/sendAudio/sendDocument (payload.photo/video/audio/document)
+   * - sendMessage (payload.text)
+   * 
+   * CP-4/5: Respeita modo group/single
    */
   async sendViaTelegramAPI(botToken, payload) {
     if (!botToken) {
@@ -578,25 +808,98 @@ class MessageService {
       const axios = require('axios');
       const apiUrl = `https://api.telegram.org/bot${botToken}`;
 
-      // Se houver mídias, usar sendMediaGroup
-      if (payload.media && payload.media.length > 0) {
+      // CP-4: Se houver mídias em array (sendMediaGroup)
+      if (payload.media && Array.isArray(payload.media) && payload.media.length > 0) {
         const response = await axios.post(`${apiUrl}/sendMediaGroup`, {
           chat_id: payload.chat_id,
           media: payload.media
-        }, { timeout: 5000 });
+        }, { timeout: 5000, validateStatus: () => true });
 
         if (response.data.ok) {
+          console.info('[START:SEND:GROUP]', JSON.stringify({
+            count: payload.media.length,
+            sent: true,
+            timestamp: new Date().toISOString()
+          }));
           return {
             ok: true,
             message_ids: response.data.result.map(m => m.message_id)
           };
         }
-        throw new Error(`Telegram API error: ${response.data.description}`);
+        // CP-8: Logar erro 400 com body sanitizado
+        const errorDesc = response.data?.description || 'Unknown error';
+        const sanitizedError = this._sanitizeTelegramError(errorDesc);
+        console.error('[START:SEND:GROUP:ERROR]', JSON.stringify({
+          count: payload.media.length,
+          status: response.status,
+          error: sanitizedError,
+          timestamp: new Date().toISOString()
+        }));
+        // Não quebrar fluxo; degradar gracefully
+        return {
+          ok: false,
+          error: sanitizedError
+        };
       }
 
-      // Caso contrário, usar sendMessage
+      // CP-5: Se houver mídia individual (photo/video/audio/document)
+      const mediaFields = ['photo', 'video', 'audio', 'document'];
+      for (const field of mediaFields) {
+        if (payload[field]) {
+          const method = `send${field.charAt(0).toUpperCase() + field.slice(1)}`;
+          const sendPayload = {
+            chat_id: payload.chat_id,
+            [field]: payload[field],
+            parse_mode: payload.parse_mode || 'HTML'
+          };
+
+          // Adicionar caption se existir
+          if (payload.caption) {
+            sendPayload.caption = payload.caption;
+            sendPayload.parse_mode = payload.parse_mode || 'MarkdownV2';
+          }
+
+          // Adicionar botões se existirem
+          if (payload.reply_markup) {
+            sendPayload.reply_markup = payload.reply_markup;
+          }
+
+          const response = await axios.post(`${apiUrl}/${method}`, sendPayload, { 
+            timeout: 5000,
+            validateStatus: () => true 
+          });
+
+          if (response.data.ok) {
+            console.info('[START:SEND:SINGLE]', JSON.stringify({
+              kind: field,
+              sent: true,
+              timestamp: new Date().toISOString()
+            }));
+            return {
+              ok: true,
+              message_id: response.data.result.message_id
+            };
+          }
+          // CP-8: Logar erro 400 com body sanitizado
+          const errorDesc = response.data?.description || 'Unknown error';
+          const sanitizedError = this._sanitizeTelegramError(errorDesc);
+          console.error('[START:SEND:SINGLE:ERROR]', JSON.stringify({
+            kind: field,
+            status: response.status,
+            error: sanitizedError,
+            timestamp: new Date().toISOString()
+          }));
+          // Não quebrar fluxo; tentar próxima mídia ou degradar
+          return {
+            ok: false,
+            error: sanitizedError
+          };
+        }
+      }
+
+      // CP-6: Caso contrário, enviar apenas texto
       if (!payload.text) {
-        throw new Error('Nenhum texto para enviar');
+        throw new Error('Nenhum conteúdo para enviar (sem texto ou mídia)');
       }
 
       const sendPayload = {
@@ -610,16 +913,35 @@ class MessageService {
         sendPayload.reply_markup = payload.reply_markup;
       }
 
-      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, { timeout: 5000 });
+      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, { 
+        timeout: 5000,
+        validateStatus: () => true 
+      });
 
       if (response.data.ok) {
+        console.info('[START:TEXT_SEND]', JSON.stringify({
+          len: payload.text.length,
+          timestamp: new Date().toISOString()
+        }));
         return {
           ok: true,
           message_id: response.data.result.message_id
         };
       }
 
-      throw new Error(`Telegram API error: ${response.data.description}`);
+      // CP-8: Logar erro 400 com body sanitizado
+      const errorDesc = response.data?.description || 'Unknown error';
+      const sanitizedError = this._sanitizeTelegramError(errorDesc);
+      console.error('[START:TEXT_SEND:ERROR]', JSON.stringify({
+        status: response.status,
+        error: sanitizedError,
+        timestamp: new Date().toISOString()
+      }));
+      // Não quebrar fluxo; retornar erro mas não lançar exceção
+      return {
+        ok: false,
+        error: sanitizedError
+      };
     } catch (error) {
       console.error(`[ERRO][TELEGRAM_API] ${error.message}`);
       throw error;
