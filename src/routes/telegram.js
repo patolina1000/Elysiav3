@@ -101,12 +101,28 @@ router.post('/:slug/webhook', async (req, res) => {
             const parts = data.split(':');
             const dataBotId = parts.length > 1 ? parseInt(parts[1], 10) : bot.id;
             const planId = parts.length > 2 ? parts.slice(2).join(':') : null;
+            const resolvedBotId = Number.isNaN(dataBotId) ? bot.id : dataBotId;
 
-            console.info('[PLAN:CLICK]', JSON.stringify({
-              botId: Number.isNaN(dataBotId) ? bot.id : dataBotId,
-              planId,
-              from: telegramId
-            }));
+            let planMeta = null;
+            try {
+              planMeta = await messageService.getPlanMetadata(bot.id, planId);
+            } catch (planMetaError) {
+              console.error('[ERRO:PLAN:METADATA_LOOKUP]', JSON.stringify({
+                botId: bot.id,
+                telegramId,
+                error: planMetaError.message
+              }));
+            }
+
+            const planLogPayload = {
+              botId: resolvedBotId,
+              telegramId,
+              plan_id: planMeta?.planId ?? (planId || null),
+              plan_name: planMeta?.name ?? null,
+              price_cents: planMeta?.priceCents ?? null
+            };
+
+            console.info('[PLANS][CLICK]', JSON.stringify(planLogPayload));
 
             if (!botToken) {
               console.warn('[PLAN:CLICK:NO_TOKEN]', JSON.stringify({

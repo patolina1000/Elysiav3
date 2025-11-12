@@ -105,7 +105,12 @@ router.get('/:id/config', async (req, res) => {
         medias: Array.isArray(content.medias) ? content.medias : [],
         plans: Array.isArray(content.plans) ? content.plans : [],
         media_mode: mediaMode,
-        attach_text_as_caption: attachTextAsCaption
+        attach_text_as_caption: attachTextAsCaption,
+        plan_layout: content.plan_layout === 'list' ? 'list' : 'adjacent',
+        plan_columns: (() => {
+          const columns = parseInt(content.plan_columns ?? content.planColumns ?? 2, 10);
+          return columns === 3 ? 3 : 2;
+        })()
       };
 
       console.log(`[GET_CONFIG] startConfig retornando:`, {
@@ -174,7 +179,15 @@ router.get('/:id/config', async (req, res) => {
 router.put('/:id/config/start', async (req, res) => {
   try {
     const { id } = req.params;
-    const { messages, medias, plans, media_mode, attach_text_as_caption } = req.body;
+    const {
+      messages,
+      medias,
+      plans,
+      media_mode,
+      attach_text_as_caption,
+      plan_layout,
+      plan_columns
+    } = req.body;
     const botId = parseInt(id, 10);
 
     console.log(`[ADMIN_BOT_CONFIG] Recebido PUT /config/start: messages=${Array.isArray(messages) ? messages.length : 0} medias=${Array.isArray(medias) ? medias.length : 0} plans=${Array.isArray(plans) ? plans.length : 0} media_mode=${media_mode}`);
@@ -247,13 +260,21 @@ router.put('/:id/config/start', async (req, res) => {
       normalizedAttachTextAsCaption = normalizedAttachTextAsCaption === true || normalizedAttachTextAsCaption === 'true';
     }
 
+    const normalizedPlanLayout = plan_layout === 'list' ? 'list' : 'adjacent';
+    let normalizedPlanColumns = parseInt(plan_columns ?? 2, 10);
+    if (normalizedPlanColumns !== 3) {
+      normalizedPlanColumns = 2;
+    }
+
     // Estruturar dados para salvar - shape canônico
     const contentJson = JSON.stringify({
       messages: normalizedMessages,
       medias: medias || [],
       plans: plans || [],
       media_mode: normalizedMediaMode,
-      attach_text_as_caption: normalizedAttachTextAsCaption
+      attach_text_as_caption: normalizedAttachTextAsCaption,
+      plan_layout: normalizedPlanLayout,
+      plan_columns: normalizedPlanColumns
     });
 
     // Buscar registro canônico (fonte única)
@@ -485,7 +506,15 @@ router.put('/:id/config/integrations', async (req, res) => {
 router.post('/:id/start/preview', async (req, res) => {
   try {
     const { id } = req.params;
-    const { messages, medias, plans, media_mode, attach_text_as_caption } = req.body;
+    const {
+      messages,
+      medias,
+      plans,
+      media_mode,
+      attach_text_as_caption,
+      plan_layout,
+      plan_columns
+    } = req.body;
     const botId = parseInt(id, 10);
 
     // Validações básicas
@@ -570,7 +599,9 @@ router.post('/:id/start/preview', async (req, res) => {
       messages: Array.isArray(messages) ? messages : [],
       medias: resolvedMedias,
       buttons: [],
-      plans: Array.isArray(plans) ? plans : []
+      plans: Array.isArray(plans) ? plans : [],
+      planLayout: plan_layout,
+      planColumns: plan_columns
     };
 
     const payloads = messageService.prepareTelegramPayloads(
