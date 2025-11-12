@@ -52,7 +52,7 @@ class MessageService {
    */
   normalizeContent(content) {
     let parsed = {};
-    
+
     if (typeof content === 'string') {
       // Se for string simples, tentar parsear como JSON
       try {
@@ -66,30 +66,36 @@ class MessageService {
     } else {
       parsed = { text: '' };
     }
-    
+
+    const ensureArray = (value) => (Array.isArray(value) ? value : []);
+    const base = { ...parsed };
+
     // Garantir que o resultado tem a estrutura esperada
-    // Se tiver messages array, manter como está
-    if (parsed.messages && Array.isArray(parsed.messages)) {
+    if (Array.isArray(base.messages)) {
+      const normalized = {
+        ...base,
+        messages: ensureArray(base.messages),
+        medias: ensureArray(base.medias),
+        plans: ensureArray(base.plans),
+        buttons: ensureArray(base.buttons)
+      };
+      delete normalized.text;
+      return normalized;
+    }
+
+    if (base.text !== undefined) {
       return {
-        messages: parsed.messages,
-        medias: parsed.medias || [],
-        plans: parsed.plans || [],
-        text: undefined // Remover text se houver messages
+        ...base,
+        text: String(base.text || ''),
+        media_ids: ensureArray(base.media_ids),
+        buttons: ensureArray(base.buttons),
+        medias: ensureArray(base.medias)
       };
     }
-    
-    // Se tiver text, manter como está
-    if (parsed.text) {
-      return {
-        text: String(parsed.text),
-        media_ids: parsed.media_ids || [],
-        buttons: parsed.buttons || [],
-        medias: parsed.medias || []
-      };
-    }
-    
-    // Fallback: retornar estrutura vazia
+
+    // Fallback: retornar estrutura vazia mantendo campos adicionais
     return {
+      ...base,
       text: '',
       media_ids: [],
       buttons: [],
