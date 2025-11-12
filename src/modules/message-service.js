@@ -642,8 +642,6 @@ class MessageService {
         return;
       }
 
-      const durationDays = this._extractDurationDays(plan);
-
       let planId = plan.id ?? plan.plan_id ?? plan.planId ?? plan.external_id ?? plan.externalId ?? plan.key ?? plan.slug ?? plan.gateway_id ?? plan.gatewayId;
       if (planId === undefined || planId === null || planId === '') {
         planId = `${index + 1}`;
@@ -659,9 +657,7 @@ class MessageService {
       }
 
       const callbackData = `plan:${botId}:${normalizedId}`;
-      const label = durationDays && durationDays > 0
-        ? `⭐ ${truncatedName} — ${durationDays}d • R$ ${priceFormatted}`
-        : `⭐ ${truncatedName} — R$ ${priceFormatted}`;
+      const label = `${truncatedName} — R$ ${priceFormatted}`;
 
       sanitized.push({
         text: label,
@@ -757,7 +753,8 @@ class MessageService {
 
       console.info(`${originKey}:PLANS_KEYBOARD_BUILD`, JSON.stringify({
         planCount: planKeyboardContext.planCount,
-        rows: planKeyboardContext.rows
+        rows: planKeyboardContext.rows,
+        labels: planButtons.map(button => button.text)
       }));
     }
 
