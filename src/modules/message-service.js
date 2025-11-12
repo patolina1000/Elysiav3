@@ -240,6 +240,11 @@ class MessageService {
    */
   renderContent(template, context = {}) {
     const contentObj = this.normalizeContent(template.content);
+
+    const planLayoutRaw = contentObj.plan_layout ?? contentObj.planLayout;
+    const planColumnsRaw = contentObj.plan_columns ?? contentObj.planColumns;
+    const planLayout = this._resolvePlanLayout(planLayoutRaw);
+    const planColumns = this._resolvePlanColumns(planColumnsRaw, planLayout);
     
     // Substituições simples (aplicar a todas as mensagens)
     const placeholders = {
@@ -282,7 +287,9 @@ class MessageService {
         media_ids: contentObj.media_ids || [],
         buttons: contentObj.buttons || [],
         medias: contentObj.medias || [],
-        plans: Array.isArray(contentObj.plans) ? contentObj.plans : []
+        plans: Array.isArray(contentObj.plans) ? contentObj.plans : [],
+        planLayout,
+        planColumns
       };
     } else if (contentObj.text) {
       // Formato antigo: usar campo text direto
@@ -293,7 +300,9 @@ class MessageService {
         media_ids: contentObj.media_ids || [],
         buttons: contentObj.buttons || [],
         medias: contentObj.medias || [],
-        plans: Array.isArray(contentObj.plans) ? contentObj.plans : []
+        plans: Array.isArray(contentObj.plans) ? contentObj.plans : [],
+        planLayout,
+        planColumns
       };
     } else {
       return {
@@ -301,7 +310,9 @@ class MessageService {
         media_ids: [],
         buttons: [],
         medias: [],
-        plans: []
+        plans: [],
+        planLayout,
+        planColumns
       };
     }
   }
@@ -548,7 +559,7 @@ class MessageService {
     return { requested: normalizedRequested, decided, eligiblePhotoVideo };
   }
 
-  _formatPriceCents(value) {
+  _parsePriceToCents(value) {
     if (value === undefined || value === null) {
       return null;
     }
@@ -585,11 +596,68 @@ class MessageService {
       }
     }
 
+    if (!Number.isFinite(cents)) {
+      return null;
+    }
+
+    const normalizedCents = Math.round(cents);
+    if (normalizedCents <= 0) {
+      return null;
+    }
+
+    return normalizedCents;
+  }
+
+  _formatPriceFromCents(cents) {
     if (!Number.isFinite(cents) || cents <= 0) {
       return null;
     }
 
     return (cents / 100).toFixed(2).replace('.', ',');
+  }
+
+  _formatPriceCents(value) {
+    const cents = this._parsePriceToCents(value);
+    if (cents === null) {
+      return null;
+    }
+
+    return this._formatPriceFromCents(cents);
+  }
+
+  _sanitizePlanIdentifier(value, fallback) {
+    let normalized = '';
+
+    if (value !== undefined && value !== null) {
+      normalized = String(value).replace(/[^a-zA-Z0-9_-]/g, '');
+    }
+
+    if (!normalized && fallback !== undefined && fallback !== null) {
+      normalized = String(fallback).replace(/[^a-zA-Z0-9_-]/g, '');
+    }
+
+    if (!normalized) {
+      normalized = '';
+    }
+
+    if (normalized.length > 32) {
+      normalized = normalized.slice(0, 32);
+    }
+
+    return normalized;
+  }
+
+  _resolvePlanLayout(layout) {
+    return layout === 'list' ? 'list' : 'adjacent';
+  }
+
+  _resolvePlanColumns(columns, layout = 'adjacent') {
+    if (layout === 'list') {
+      return 1;
+    }
+
+    const parsed = parseInt(columns ?? 2, 10);
+    return parsed === 3 ? 3 : 2;
   }
 
   _extractDurationDays(plan) {
@@ -625,7 +693,7 @@ class MessageService {
       return [];
     }
 
-    const sanitized = [];
+    const normalized = [];
     const limitedPlans = plans.slice(0, 10);
 
     limitedPlans.forEach((plan, index) => {
@@ -633,39 +701,67 @@ class MessageService {
         return;
       }
 
-      const nameCandidate = (plan.name || plan.title || `Plano ${index + 1}`).toString();
-      const safeName = nameCandidate.replace(/\s+/g, ' ').trim() || `Plano ${index + 1}`;
-      const truncatedName = safeName.length > 50 ? `${safeName.slice(0, 47).trim()}…` : safeName;
-
-      const priceFormatted = this._formatPriceCents(plan.price_cents ?? plan.priceCents ?? plan.value ?? plan.amount_cents ?? plan.amountCents ?? plan.price);
-      if (!priceFormatted) {
+      const priceSource = plan.price_cents ?? plan.priceCents ?? plan.value ?? plan.amount_cents ?? plan.amountCents ?? plan.price;
+      const priceCents = this._parsePriceToCents(priceSource);
+      if (priceCents === null) {
         return;
       }
 
-      let planId = plan.id ?? plan.plan_id ?? plan.planId ?? plan.external_id ?? plan.externalId ?? plan.key ?? plan.slug ?? plan.gateway_id ?? plan.gatewayId;
-      if (planId === undefined || planId === null || planId === '') {
-        planId = `${index + 1}`;
-      }
+      const priceFormatted = this._formatPriceFromCents(priceCents) || '0,00';
 
-      let normalizedId = String(planId).replace(/[^a-zA-Z0-9_-]/g, '');
+      const nameCandidate = (plan.name || plan.title || `Plano ${index + 1}`).toString();
+      const safeName = nameCandidate.replace(/\s+/g, ' ').trim() || `Plano ${index + 1}`;
+
+      const planIdRaw =
+        plan.id
+        ?? plan.plan_id
+        ?? plan.planId
+        ?? plan.external_id
+        ?? plan.externalId
+        ?? plan.key
+        ?? plan.slug
+        ?? plan.gateway_id
+        ?? plan.gatewayId;
+
+      let normalizedId = this._sanitizePlanIdentifier(planIdRaw, index + 1);
       if (!normalizedId) {
-        normalizedId = `${index + 1}`;
+        normalizedId = this._sanitizePlanIdentifier(index + 1);
       }
 
-      if (normalizedId.length > 32) {
-        normalizedId = normalizedId.slice(0, 32);
+      if (!normalizedId) {
+        return;
       }
 
+      const suffix = ` — R$ ${priceFormatted}`;
+      const maxLabelLength = 48;
+      const maxNameLength = Math.max(1, maxLabelLength - suffix.length);
+
+      let displayName = safeName;
+      if (displayName.length > maxNameLength) {
+        const sliceLength = Math.max(1, maxNameLength - 1);
+        displayName = `${displayName.slice(0, sliceLength).trim()}…`;
+      }
+
+      const label = `${displayName}${suffix}`.slice(0, maxLabelLength);
       const callbackData = `plan:${botId}:${normalizedId}`;
-      const label = `${truncatedName} — R$ ${priceFormatted}`;
 
-      sanitized.push({
-        text: label,
-        callback_data: callbackData
+      normalized.push({
+        button: {
+          text: label,
+          callback_data: callbackData
+        },
+        meta: {
+          normalizedId,
+          planId: planIdRaw !== undefined && planIdRaw !== null ? String(planIdRaw) : normalizedId,
+          name: safeName,
+          priceCents,
+          priceFormatted,
+          label
+        }
       });
     });
 
-    return sanitized;
+    return normalized;
   }
 
   /**
@@ -736,26 +832,41 @@ class MessageService {
 
     const originKey = options.origin === 'preview' ? 'PREVIEW' : 'START';
     const allowPlans = options.origin === 'start' || options.origin === 'preview';
-    const planButtons = allowPlans ? this._normalizePlansForKeyboard(renderedContent?.plans, botId) : [];
+    const planEntries = allowPlans ? this._normalizePlansForKeyboard(renderedContent?.plans, botId) : [];
     let planKeyboardContext = null;
 
-    if (planButtons.length > 0) {
+    if (planEntries.length > 0) {
+      const planLayout = this._resolvePlanLayout(renderedContent?.planLayout);
+      const planColumns = this._resolvePlanColumns(renderedContent?.planColumns, planLayout);
+      const planButtons = planEntries.map(entry => entry.button);
       const rows = [];
-      for (let i = 0; i < planButtons.length; i += 2) {
-        rows.push(planButtons.slice(i, i + 2));
+
+      for (let i = 0; i < planButtons.length; i += planColumns) {
+        rows.push(planButtons.slice(i, i + planColumns));
       }
+
+      const telemetry = {
+        layout: planLayout,
+        columns: planLayout === 'list' ? 1 : planColumns,
+        rows: rows.length,
+        buttons: planButtons.length
+      };
+
+      console.info(`[${originKey}:PLANS]`, JSON.stringify({
+        count: telemetry.buttons,
+        layout: telemetry.layout,
+        columns: telemetry.columns
+      }));
 
       planKeyboardContext = {
         markup: { inline_keyboard: rows },
         planCount: planButtons.length,
-        rows: rows.length
+        rows: rows.length,
+        layout: planLayout,
+        columns: planColumns,
+        telemetry,
+        plansMeta: planEntries.map(entry => entry.meta)
       };
-
-      console.info(`${originKey}:PLANS_KEYBOARD_BUILD`, JSON.stringify({
-        planCount: planKeyboardContext.planCount,
-        rows: planKeyboardContext.rows,
-        labels: planButtons.map(button => button.text)
-      }));
     }
 
     let singleIndex = 0;
@@ -864,6 +975,7 @@ class MessageService {
     });
 
     let planAttached = false;
+    let plansTelemetryLogged = false;
 
     if (planKeyboardContext) {
       if (textPayloads.length > 0) {
@@ -874,11 +986,21 @@ class MessageService {
           planCarrier: true,
           planCount: planKeyboardContext.planCount,
           planLogOnDispatch: true,
-          planCarrierCreatedFinal: false
+          planCarrierCreatedFinal: false,
+          planLayout: planKeyboardContext.layout,
+          planColumns: planKeyboardContext.columns
         };
         planAttached = true;
+
+        if (!plansTelemetryLogged) {
+          console.info(`[${originKey}:PLANS:SENT]`, JSON.stringify({
+            rows: planKeyboardContext.telemetry.rows,
+            buttons: planKeyboardContext.telemetry.buttons
+          }));
+          plansTelemetryLogged = true;
+        }
       } else {
-        const finalText = 'Escolha um plano 👇';
+        const finalText = 'Escolha um plano';
         const finalPayload = {
           chat_id: telegramId,
           text: finalText,
@@ -892,15 +1014,26 @@ class MessageService {
           planCarrier: true,
           planCount: planKeyboardContext.planCount,
           planLogOnDispatch: false,
-          planCarrierCreatedFinal: true
+          planCarrierCreatedFinal: true,
+          planLayout: planKeyboardContext.layout,
+          planColumns: planKeyboardContext.columns
         };
         textPayloads.push(finalPayload);
         textIndex += 1;
 
         console.info(`${originKey}:PLANS_ATTACHED`, JSON.stringify({
-          toMessage: 'created_final',
-          planCount: planKeyboardContext.planCount
+          method: 'fallback_text',
+          planCount: planKeyboardContext.planCount,
+          textLength: finalText.length
         }));
+
+        if (!plansTelemetryLogged) {
+          console.info(`[${originKey}:PLANS:SENT]`, JSON.stringify({
+            rows: planKeyboardContext.telemetry.rows,
+            buttons: planKeyboardContext.telemetry.buttons
+          }));
+          plansTelemetryLogged = true;
+        }
 
         planAttached = true;
       }
@@ -1006,6 +1139,35 @@ class MessageService {
     }
 
     return { responses };
+  }
+
+  async getPlanMetadata(botId, planIdentifier) {
+    if (!botId || planIdentifier === undefined || planIdentifier === null) {
+      return null;
+    }
+
+    const normalizedId = this._sanitizePlanIdentifier(planIdentifier);
+    if (!normalizedId) {
+      return null;
+    }
+
+    try {
+      const template = await this.getMessageTemplate(botId, 'start');
+      if (!template || !Array.isArray(template.content?.plans)) {
+        return null;
+      }
+
+      const normalizedPlans = this._normalizePlansForKeyboard(template.content.plans, botId);
+      const match = normalizedPlans.find(entry => entry.meta.normalizedId === normalizedId);
+
+      return match ? match.meta : null;
+    } catch (error) {
+      console.error('[ERRO:PLAN:METADATA]', JSON.stringify({
+        botId,
+        error: error.message
+      }));
+      return null;
+    }
   }
 
   /**
