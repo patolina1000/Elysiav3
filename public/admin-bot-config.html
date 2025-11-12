@@ -670,6 +670,17 @@
               <p style="color: var(--text-tertiary); font-size: 12px; margin-bottom: 20px;">
                 Configure aqui os planos que aparecerão para o usuário quando ele iniciar o bot.
               </p>
+              <!-- Modo de exibição dos planos -->
+              <div class="form-group" style="margin-bottom: 20px;">
+                <label for="plansLayout">Modo de exibição dos planos</label>
+                <select id="plansLayout" name="plans_layout" onchange="updatePlansLayout()">
+                  <option value="adjacent">⛓️ Adjacentes (lado a lado)</option>
+                  <option value="list">🗒️ Lista (uma linha por plano)</option>
+                </select>
+                <small id="plansLayoutHelp" style="display:block; margin-top:8px; color: var(--text-tertiary);">
+                  <strong>Adjacentes:</strong> botões lado a lado em linhas. <strong>Lista:</strong> um botão por linha.
+                </small>
+              </div>
               <div id="plansList" class="config-items-list">
                 <div class="empty-state">
                   <p>Nenhum plano configurado ainda.</p>
