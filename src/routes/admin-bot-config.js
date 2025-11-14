@@ -12,6 +12,7 @@
 const express = require('express');
 const router = express.Router();
 const MessageService = require('../modules/message-service');
+const ShotScheduler = require('../modules/shot-scheduler');
 
 /**
  * Obter configuração completa do bot
@@ -124,19 +125,28 @@ router.get('/:id/config', async (req, res) => {
 
     // Buscar downsells
     const downsellsResult = await req.pool.query(
-      `SELECT id, slug, content, delay_seconds, active FROM bot_downsells 
+      `SELECT id, slug, content, delay_seconds, active, trigger_type FROM bot_downsells 
        WHERE bot_id = $1 
        ORDER BY delay_seconds ASC`,
       [botId]
     );
 
     // Buscar shots
+    // Nota: Todos os shots (imediatos e agendados) são deletados após execução
+    // Apenas shots pendentes de disparo ficam visíveis na UI
     const shotsResult = await req.pool.query(
-      `SELECT id, slug, content, filter_criteria, active FROM shots 
+      `SELECT id, slug, content, filter_criteria, active, trigger_type, schedule_type, scheduled_at 
+       FROM shots 
        WHERE bot_id = $1 
        ORDER BY created_at DESC`,
       [botId]
     );
+
+    // Parsear content dos shots (JSONB vem como string em alguns drivers)
+    const shots = shotsResult.rows.map(shot => ({
+      ...shot,
+      content: typeof shot.content === 'string' ? JSON.parse(shot.content) : shot.content
+    }));
 
     // Buscar integrações (se houver tabela)
     // TODO: Buscar configurações de UTMify e Facebook CAPI quando tabela for criada
@@ -151,7 +161,7 @@ router.get('/:id/config', async (req, res) => {
       },
       startMessage: startConfig,
       downsells: downsellsResult.rows,
-      shots: shotsResult.rows,
+      shots,
       integrations: {
         utmify: null,
         facebook: null
@@ -329,7 +339,7 @@ router.put('/:id/config/start', async (req, res) => {
 /**
  * Atualizar regras de downsell
  * PUT /api/admin/bots/:id/config/downsells
- * Body: { downsells: [{ id?, slug, content (string ou JSON), delay_seconds, active }] }
+ * Body: { downsells: [{ id?, slug, name?, content (string ou JSON), delay_seconds, active, trigger_type }] }
  */
 router.put('/:id/config/downsells', async (req, res) => {
   try {
@@ -344,10 +354,59 @@ router.put('/:id/config/downsells', async (req, res) => {
       });
     }
 
+    // Se array vazio, deletar todos os downsells do bot
+    if (downsells.length === 0) {
+      await req.pool.query(
+        'DELETE FROM bot_downsells WHERE bot_id = $1',
+        [botId]
+      );
+      console.log(`[ADMIN_BOT_CONFIG] Todos downsells deletados: bot=${botId}`);
+      return res.status(200).json({
+        success: true,
+        data: [],
+        deleted: true
+      });
+    }
+
+    // Buscar IDs existentes no banco
+    const existingResult = await req.pool.query(
+      'SELECT id FROM bot_downsells WHERE bot_id = $1',
+      [botId]
+    );
+    const existingIds = new Set(existingResult.rows.map(r => r.id));
+    const receivedIds = new Set(downsells.filter(d => d.id).map(d => d.id));
+
+    // Deletar downsells que não estão mais no array recebido
+    const idsToDelete = [...existingIds].filter(id => !receivedIds.has(id));
+    if (idsToDelete.length > 0) {
+      await req.pool.query(
+        'DELETE FROM bot_downsells WHERE id = ANY($1) AND bot_id = $2',
+        [idsToDelete, botId]
+      );
+      console.log(`[ADMIN_BOT_CONFIG] Downsells deletados: bot=${botId} ids=${idsToDelete.join(',')}`);
+    }
+
     const results = [];
 
     for (const downsell of downsells) {
-      const { id: downsellId, slug, content, delay_seconds, active } = downsell;
+      const { id: downsellId, slug, name, content, delay_seconds, active, trigger_type } = downsell;
+      
+      // Validar e normalizar trigger_type
+      const normalizedTriggerType = (trigger_type === 'pix') ? 'pix' : 'start';
+
+      // Gerar name se não fornecido (usar slug como fallback)
+      const downsellName = name || slug || `Downsell ${Date.now()}`;
+
+      // LOG: Ver o que está chegando do frontend
+      console.log('[ADMIN_BOT_CONFIG][DOWNSELL][RECEIVED]', JSON.stringify({
+        slug,
+        contentType: typeof content,
+        hasText: content?.text ? 'YES' : 'NO',
+        hasMedias: content?.medias ? 'YES' : 'NO',
+        mediasCount: content?.medias?.length || 0,
+        hasPlans: content?.plans ? 'YES' : 'NO',
+        plansCount: content?.plans?.length || 0
+      }));
 
       // Normalizar content para JSON válido
       let contentJson;
@@ -359,28 +418,39 @@ router.put('/:id/config/downsells', async (req, res) => {
         contentJson = JSON.stringify({ text: String(content) });
       }
 
+      // LOG: Ver o que será salvo no banco
+      const contentParsed = JSON.parse(contentJson);
+      console.log('[ADMIN_BOT_CONFIG][DOWNSELL][SAVING]', JSON.stringify({
+        slug,
+        hasText: contentParsed.text ? 'YES' : 'NO',
+        hasMedias: contentParsed.medias ? 'YES' : 'NO',
+        mediasCount: contentParsed.medias?.length || 0,
+        hasPlans: contentParsed.plans ? 'YES' : 'NO',
+        plansCount: contentParsed.plans?.length || 0
+      }));
+
       if (downsellId) {
         // Atualizar
         await req.pool.query(
           `UPDATE bot_downsells 
-           SET slug = $1, content = $2, delay_seconds = $3, active = $4, updated_at = NOW()
-           WHERE id = $5 AND bot_id = $6`,
-          [slug, contentJson, delay_seconds, active, downsellId, botId]
+           SET slug = $1, name = $2, content = $3, delay_seconds = $4, active = $5, trigger_type = $6, updated_at = NOW()
+           WHERE id = $7 AND bot_id = $8`,
+          [slug, downsellName, contentJson, delay_seconds, active, normalizedTriggerType, downsellId, botId]
         );
-        results.push({ id: downsellId, action: 'updated' });
+        results.push({ id: downsellId, slug, name: downsellName, trigger_type: normalizedTriggerType, updated: true });
       } else {
         // Criar
         const createResult = await req.pool.query(
-          `INSERT INTO bot_downsells (bot_id, slug, content, delay_seconds, active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+          `INSERT INTO bot_downsells (bot_id, slug, name, content, delay_seconds, active, trigger_type, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
            RETURNING id`,
-          [botId, slug, contentJson, delay_seconds, active !== false]
+          [botId, slug, downsellName, contentJson, delay_seconds, active !== false, normalizedTriggerType]
         );
-        results.push({ id: createResult.rows[0].id, action: 'created' });
+        results.push({ id: createResult.rows[0].id, slug, name: downsellName, trigger_type: normalizedTriggerType, created: true });
       }
     }
 
-    console.log(`[ADMIN_BOT_CONFIG] Downsells atualizados: bot=${botId} count=${results.length}`);
+    console.log(`[ADMIN_BOT_CONFIG] Downsells atualizados: bot=${botId} count=${results.length} deleted=${idsToDelete.length}`);
 
     res.status(200).json({
       success: true,
@@ -398,7 +468,7 @@ router.put('/:id/config/downsells', async (req, res) => {
 /**
  * Atualizar disparos (shots)
  * PUT /api/admin/bots/:id/config/shots
- * Body: { shots: [{ id?, slug, content (string ou JSON), filter_criteria?, active }] }
+ * Body: { shots: [{ id?, slug, content (string ou JSON), filter_criteria?, active, trigger_type?, schedule_type?, scheduled_at? }] }
  */
 router.put('/:id/config/shots', async (req, res) => {
   try {
@@ -416,7 +486,16 @@ router.put('/:id/config/shots', async (req, res) => {
     const results = [];
 
     for (const shot of shots) {
-      const { id: shotId, slug, content, filter_criteria, active } = shot;
+      const { 
+        id: shotId, 
+        slug, 
+        content, 
+        filter_criteria, 
+        active,
+        trigger_type,
+        schedule_type,
+        scheduled_at
+      } = shot;
 
       // Normalizar content para JSON válido
       let contentJson;
@@ -428,24 +507,66 @@ router.put('/:id/config/shots', async (req, res) => {
         contentJson = JSON.stringify({ text: String(content) });
       }
 
+      // Normalizar trigger_type e schedule_type
+      const normalizedTriggerType = trigger_type || 'start';
+      const normalizedScheduleType = schedule_type || 'immediate';
+      const normalizedScheduledAt = scheduled_at || null;
+
+      // Normalizar filter_criteria para JSONB (pode ser string ou objeto)
+      let filterCriteriaJson = null;
+      if (filter_criteria) {
+        if (typeof filter_criteria === 'string') {
+          try {
+            filterCriteriaJson = JSON.parse(filter_criteria);
+          } catch (e) {
+            // Se não for JSON válido, ignorar (deixar null)
+            filterCriteriaJson = null;
+          }
+        } else if (typeof filter_criteria === 'object') {
+          filterCriteriaJson = filter_criteria;
+        }
+      }
+
+      let finalShotId;
+
       if (shotId) {
         // Atualizar
         await req.pool.query(
           `UPDATE shots 
-           SET slug = $1, content = $2, filter_criteria = $3, active = $4, updated_at = NOW()
-           WHERE id = $5 AND bot_id = $6`,
-          [slug, contentJson, filter_criteria || null, active, shotId, botId]
+           SET slug = $1, content = $2, filter_criteria = $3, active = $4, 
+               trigger_type = $5, schedule_type = $6, scheduled_at = $7, updated_at = NOW()
+           WHERE id = $8 AND bot_id = $9`,
+          [slug, contentJson, filterCriteriaJson, active, 
+           normalizedTriggerType, normalizedScheduleType, normalizedScheduledAt,
+           shotId, botId]
         );
+        finalShotId = shotId;
         results.push({ id: shotId, action: 'updated' });
       } else {
         // Criar
         const createResult = await req.pool.query(
-          `INSERT INTO shots (bot_id, slug, content, filter_criteria, active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+          `INSERT INTO shots (bot_id, slug, title, content, filter_criteria, active, 
+                              trigger_type, schedule_type, scheduled_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
            RETURNING id`,
-          [botId, slug, contentJson, filter_criteria || null, active !== false]
+          [botId, slug, slug, contentJson, filterCriteriaJson, active !== false,
+           normalizedTriggerType, normalizedScheduleType, normalizedScheduledAt]
         );
-        results.push({ id: createResult.rows[0].id, action: 'created' });
+        finalShotId = createResult.rows[0].id;
+        results.push({ id: finalShotId, action: 'created' });
+      }
+
+      // Se shot é imediato e ativo, criar jobs na fila
+      // NOTA: Shot será deletado pelo broadcast após envio completo
+      if (normalizedScheduleType === 'immediate' && active) {
+        console.log('[SHOT][SAVE] Criando jobs para shot imediato', { shotId: finalShotId, botId });
+        const scheduler = new ShotScheduler(req.pool);
+        const queueResult = await scheduler.createImmediateJobs(finalShotId, botId);
+        console.log('[SHOT][SAVE][QUEUE_RESULT]', { 
+          shotId: finalShotId, 
+          queued: queueResult.queued, 
+          skipped: queueResult.skipped 
+        });
       }
     }
 
@@ -457,6 +578,44 @@ router.put('/:id/config/shots', async (req, res) => {
     });
   } catch (error) {
     console.error('[ERRO][ADMIN_BOT_CONFIG] Falha ao atualizar shots:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Deletar um shot específico
+ * DELETE /api/admin/bots/:id/config/shots/:shotId
+ */
+router.delete('/:id/config/shots/:shotId', async (req, res) => {
+  try {
+    const { id, shotId } = req.params;
+    const botId = parseInt(id, 10);
+    const shotIdNum = parseInt(shotId, 10);
+
+    // Deletar o shot do banco de dados
+    const result = await req.pool.query(
+      'DELETE FROM shots WHERE id = $1 AND bot_id = $2 RETURNING id',
+      [shotIdNum, botId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Shot não encontrado'
+      });
+    }
+
+    console.log(`[ADMIN_BOT_CONFIG] Shot deletado: bot=${botId} shotId=${shotIdNum}`);
+
+    res.status(200).json({
+      success: true,
+      data: { id: shotIdNum, deleted: true }
+    });
+  } catch (error) {
+    console.error('[ERRO][ADMIN_BOT_CONFIG] Falha ao deletar shot:', error);
     res.status(400).json({
       success: false,
       error: error.message
@@ -595,14 +754,25 @@ router.post('/:id/start/preview', async (req, res) => {
       Array.isArray(medias) ? medias : []
     );
 
-    const renderedContent = {
-      messages: Array.isArray(messages) ? messages : [],
-      medias: resolvedMedias,
-      buttons: [],
-      plans: Array.isArray(plans) ? plans : [],
-      planLayout: plan_layout,
-      planColumns: plan_columns
+    // Renderizar conteúdo igual ao /start para 100% fidelidade
+    const templateForRender = {
+      content: {
+        messages: Array.isArray(messages) ? messages : [],
+        medias: resolvedMedias,
+        buttons: [],
+        plans: Array.isArray(plans) ? plans : [],
+        planLayout: plan_layout,
+        planColumns: plan_columns
+      }
     };
+
+    const previewContext = {
+      userName: 'Preview User',
+      botName: bot.name || 'Bot Preview',
+      userId: 'preview'
+    };
+
+    const renderedContent = messageService.renderContent(templateForRender, previewContext);
 
     const payloads = messageService.prepareTelegramPayloads(
       botId,
@@ -869,6 +1039,94 @@ router.post('/:id/media/upload', async (req, res) => {
     res.status(400).json({
       success: false,
       error: error.message
+    });
+  }
+});
+
+/**
+ * Listar usuários pagantes de um bot
+ * GET /api/admin/bots/:id/users
+ */
+router.get('/:id/users', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const botId = parseInt(id, 10);
+
+    if (isNaN(botId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID do bot inválido'
+      });
+    }
+
+    // Buscar pagamentos com status paid ou refunded, ordenados do mais recente para o mais antigo
+    const result = await req.pool.query(
+      `SELECT 
+        p.id,
+        p.customer_first_name,
+        p.customer_last_name,
+        p.value_cents,
+        p.source_kind,
+        p.source_slug,
+        p.status,
+        p.paid_at,
+        p.created_at,
+        bu.telegram_id
+       FROM payments p
+       LEFT JOIN bot_users bu ON p.bot_user_id = bu.id
+       WHERE p.bot_id = $1 
+         AND p.status IN ('paid', 'refunded')
+       ORDER BY p.paid_at DESC NULLS LAST, p.created_at DESC
+       LIMIT 1000`,
+      [botId]
+    );
+
+    // Formatar dados para o frontend
+    const users = result.rows.map(row => {
+      const firstName = row.customer_first_name || '';
+      const lastName = row.customer_last_name || '';
+      const fullName = `${firstName} ${lastName}`.trim() || 'Nome não disponível';
+      
+      // Formatar origem
+      let origin = 'Desconhecido';
+      if (row.source_kind === 'start') {
+        origin = '/start';
+      } else if (row.source_kind === 'downsell') {
+        origin = `Downsell: ${row.source_slug || 'N/A'}`;
+      } else if (row.source_kind === 'shot') {
+        origin = `Shot: ${row.source_slug || 'N/A'}`;
+      }
+
+      return {
+        id: row.id,
+        fullName,
+        firstName,
+        lastName,
+        valueCents: row.value_cents,
+        valueFormatted: `R$ ${(row.value_cents / 100).toFixed(2).replace('.', ',')}`,
+        origin,
+        sourceKind: row.source_kind,
+        sourceSlug: row.source_slug,
+        status: row.status,
+        paidAt: row.paid_at,
+        createdAt: row.created_at,
+        telegramId: row.telegram_id
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        users,
+        count: users.length
+      }
+    });
+
+  } catch (error) {
+    console.error('[ERRO][USERS_LIST]', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Erro ao buscar usuários'
     });
   }
 });

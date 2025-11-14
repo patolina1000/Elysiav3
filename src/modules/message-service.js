@@ -1,33 +1,49 @@
 /**
- * Message Service - Sistema Unificado de Envio de Mensagens
+ * Message Service - Envio centralizado de mensagens
  * 
  * Responsabilidades:
  * - Buscar templates de mensagens (start, downsell, shot)
- * - Buscar mídias associadas (até 3 por mensagem)
- * - Renderizar mensagens com contexto
- * - Preparar envio via Telegram API
- * - Enviar mensagens via Telegram
- * - Registrar eventos de envio
+ * - Resolver mídias via MediaResolver
+ * - Renderizar conteúdo com contexto dinâmico
+ * - Preparar payloads para Telegram API
+ * - Enviar via Telegram API
+ * - Registrar eventos de funil
  * 
- * Tipos de mensagem:
- * - 'start': Mensagem inicial do /start
- * - 'downsell': Mensagens de downsell (após X minutos ou após PIX não pago)
- * - 'shot': Mensagens de disparo em massa
+ * Tipos de mensagem suportados:
+ * - start: Mensagem inicial do /start
+ * - downsell: Downsell após delay
+ * - shot: Disparo em massa
  * 
  * Tipos de mídia suportados:
- * - 'photo': Foto/imagem
- * - 'video': Vídeo
- * - 'audio': Áudio
+ * - photo: Foto individual ou em álbum
+ * - video: Vídeo individual ou em álbum
+ * - audio: Áudio sempre individual
+ * - document: Documento sempre individual
  * 
- * Estrutura de content (JSON):
- * {
- *   "text": "Conteúdo da mensagem",
- *   "media_ids": [1, 2, 3],  // até 3 mídias
- *   "buttons": [{ "text": "...", "callback_data": "..." }]  // opcional
- * }
+ * Fluxo completo:
+ * 1. getMessageTemplate() - buscar template
+ * 2. MediaResolver.resolveMedias() - resolver mídias
+ * 3. renderContent() - renderizar com contexto
+ * 4. prepareTelegramPayloads() - preparar payloads
+ * 5. dispatchPayloads() - enviar via API
+ * 6. Registrar em funnel_events
  */
 
+// OTIMIZAÇÃO CRÍTICA: Agent global para reutilizar conexões TCP
+// maxSockets aumentado para 50 (permite até 50 vídeos simultâneos)
+// timeout aumentado para 15s (vídeos grandes podem demorar)
+const https = require('https');
+const GLOBAL_HTTPS_AGENT = new https.Agent({
+  keepAlive: true,
+  maxSockets: 50,           // ↑ 20 → 50 (mais paralelismo)
+  maxFreeSockets: 20,       // ↑ 10 → 20 (mais conexões idle)
+  timeout: 15000,           // ↑ 5s → 15s (vídeos grandes)
+  freeSocketTimeout: 60000, // ↑ 30s → 60s (manter conexões por mais tempo)
+  scheduling: 'lifo'        // LIFO = reusar conexões recentes (mais quente)
+});
+
 const MediaResolver = require('./media-resolver');
+const { getRateLimiter } = require('./rate-limiter');
 
 const startConfigCache = new Map();
 
@@ -36,6 +52,7 @@ class MessageService {
     this.pool = pool;
     this.config = config;
     this.mediaResolver = new MediaResolver(pool, config);
+    this.rateLimiter = getRateLimiter();
   }
 
   static invalidateStartConfigCache(botId) {
@@ -108,11 +125,12 @@ class MessageService {
   /**
    * Buscar template de mensagem
    * messageType: 'start', 'downsell', 'shot'
+   * specificId: ID específico do downsell ou shot (opcional)
    * 
    * Nota: Para 'downsell' e 'shot', buscar na tabela específica (bot_downsells, shots)
    * Para 'start', buscar em bot_messages
    */
-  async getMessageTemplate(botId, messageType) {
+  async getMessageTemplate(botId, messageType, specificId = null) {
     try {
       let result;
       let query;
@@ -146,13 +164,21 @@ class MessageService {
         params = [botId];
         result = await this.pool.query(query, params);
       } else if (messageType === 'shot') {
-        // Buscar em shots (primeira disponível)
-        query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
-                 FROM shots 
-                 WHERE bot_id = $1 AND active = TRUE 
-                 ORDER BY created_at DESC
-                 LIMIT 1`;
-        params = [botId];
+        // Buscar em shots (por ID específico ou primeira disponível)
+        if (specificId) {
+          query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
+                   FROM shots 
+                   WHERE id = $1 AND bot_id = $2 AND active = TRUE 
+                   LIMIT 1`;
+          params = [specificId, botId];
+        } else {
+          query = `SELECT id, bot_id, slug, content, active, created_at, updated_at 
+                   FROM shots 
+                   WHERE bot_id = $1 AND active = TRUE 
+                   ORDER BY created_at DESC
+                   LIMIT 1`;
+          params = [botId];
+        }
         result = await this.pool.query(query, params);
       } else {
         console.warn(`[MESSAGE] Tipo de mensagem desconhecido: type=${messageType}`);
@@ -323,29 +349,41 @@ class MessageService {
    * 
    * Fluxo:
    * 1. Buscar template
-   * 2. Resolver mídias via MediaResolver
-   * 3. Renderizar conteúdo (suporta múltiplas mensagens)
-   * 4. Preparar payloads para Telegram
-   * 5. Enviar via Telegram API (todas as mensagens)
-   * 6. Registrar em funnel_events
-   * 
-   * Tipos de mensagem suportados:
-   * - 'start': Mensagem inicial do /start (pode ter múltiplas mensagens)
    * - 'downsell': Downsell (após delay)
    * - 'shot': Disparo em massa
+   * 
+   * @param {number} specificId - ID específico do downsell ou shot (opcional)
+   * @param {object} preloadedTemplate - Template pré-carregado (evita busca no banco)
    */
-  async sendMessage(botId, telegramId, messageType, context = {}, botToken = null) {
+  async sendMessage(botId, telegramId, messageType, context = {}, botToken = null, specificId = null, preloadedTemplate = null) {
     const startTime = Date.now();
+    const breakdown = {};
 
     try {
-      // 1. Buscar template
-      const template = await this.getMessageTemplate(botId, messageType);
-      if (!template) {
-        throw new Error(`Template não encontrado: type=${messageType}`);
+      // 1. Buscar template (ou usar pré-carregado)
+      const t1 = Date.now();
+      let template;
+      
+      if (preloadedTemplate) {
+        // Usar template pré-carregado (broadcast já carregou)
+        // Normalizar content para garantir estrutura consistente
+        template = {
+          ...preloadedTemplate,
+          content: this.normalizeContent(preloadedTemplate.content)
+        };
+        console.log('[MESSAGE][TEMPLATE][PRELOADED]', { messageType, specificId });
+      } else {
+        // Buscar do banco (fluxo normal)
+        template = await this.getMessageTemplate(botId, messageType, specificId);
+        if (!template) {
+          throw new Error(`Template não encontrado: type=${messageType}`);
+        }
       }
+      breakdown.templateLookup = Date.now() - t1;
 
       // 2. Resolver mídias via MediaResolver (em vez de getMessageMedia)
       // Primeiro, buscar bot_slug para resolver mídias
+      const t2 = Date.now();
       const botResult = await this.pool.query(
         'SELECT slug FROM bots WHERE id = $1',
         [botId]
@@ -357,11 +395,15 @@ class MessageService {
         const mediasInConfig = template.content.medias || [];
         medias = await this.mediaResolver.resolveMedias(botSlug, mediasInConfig);
       }
+      breakdown.mediaResolve = Date.now() - t2;
 
       // 3. Renderizar conteúdo (retorna todas as mensagens)
+      const t3 = Date.now();
       const renderedContent = this.renderContent(template, context);
+      breakdown.contentRender = Date.now() - t3;
 
       // CP-1: Normalizar media_mode e attach_text_as_caption
+      const t4 = Date.now();
       let mediaMode = template.content?.media_mode;
       let attachTextAsCaption = template.content?.attach_text_as_caption;
       const plansFromConfig = Array.isArray(template.content?.plans)
@@ -385,9 +427,21 @@ class MessageService {
 
       if (messageType === 'start') {
         console.info(`START:CONFIG_NORMALIZED { mediaMode:"${mediaMode}", attachTextAsCaption:${attachTextAsCaption}, planCount:${planCount} }`);
+      } else if (messageType === 'downsell') {
+        console.info(`[DOWNSELL][BUILD_MESSAGE] { mediaMode:"${mediaMode}", attachTextAsCaption:${attachTextAsCaption}, planCount:${planCount}, mediasInConfig:${template.content.medias?.length || 0} }`);
       }
 
       // 4. Preparar payloads para Telegram (um por mensagem)
+      // Preparar options com origem e slug específico
+      const payloadOptions = { origin: messageType };
+      
+      // Para downsells e shots, passar o slug específico
+      if (messageType === 'downsell' && template.slug) {
+        payloadOptions.downsellSlug = template.slug;
+      } else if (messageType === 'shot' && template.slug) {
+        payloadOptions.shotSlug = template.slug;
+      }
+      
       const payloads = this.prepareTelegramPayloads(
         botId,
         telegramId,
@@ -395,61 +449,125 @@ class MessageService {
         medias,
         mediaMode,
         attachTextAsCaption,
-        { origin: messageType === 'start' ? 'start' : 'generic' }
+        payloadOptions
       );
 
       if (!payloads || payloads.length === 0) {
         throw new Error(`Nenhum payload para enviar`);
       }
+      breakdown.payloadPreparation = Date.now() - t4;
 
       // 5. Enviar via Telegram API (se botToken fornecido)
+      const t5 = Date.now();
       let responses = [];
+      let dispatchDuration = 0;
       if (botToken) {
         const dispatchResult = await this.dispatchPayloads(botToken, payloads, {
-          origin: messageType === 'start' ? 'start' : 'generic'
+          origin: messageType // ← Passar o tipo real (start, downsell, shot)
         });
         responses = dispatchResult.responses;
+        dispatchDuration = dispatchResult.totalDispatchDuration || (Date.now() - t5);
       }
+      breakdown.telegramDispatch = dispatchDuration;
 
-      // 6. Registrar em funnel_events
+      // 6. Registrar em funnel_events (OTIMIZAÇÃO: assíncrono para não bloquear)
+      const t6 = Date.now();
       const eventName = this.mapMessageTypeToEventName(messageType);
       if (eventName) {
-        try {
-          await this.pool.query(
-            `INSERT INTO funnel_events (event_name, bot_id, telegram_id, meta, occurred_at)
-             VALUES ($1, $2, $3, $4, NOW())`,
-            [eventName, botId, telegramId, JSON.stringify({ type: messageType, messages: payloads.length, medias: medias.length })]
-          );
-          console.info('[START:FUNNEL_EVENT_REGISTERED]', JSON.stringify({
-            botId,
-            telegramId,
-            eventName,
-            timestamp: new Date().toISOString()
-          }));
-        } catch (dbError) {
-          console.error('[ERRO:START:FUNNEL_EVENT]', JSON.stringify({
-            botId,
-            telegramId,
-            eventName,
-            error: dbError.message,
-            code: dbError.code,
-            timestamp: new Date().toISOString()
-          }));
-        }
+        // OTIMIZAÇÃO: Fazer insert assíncrono para não bloquear resposta
+        setImmediate(async () => {
+          try {
+            await this.pool.query(
+              `INSERT INTO funnel_events (event_name, bot_id, telegram_id, meta, occurred_at)
+               VALUES ($1, $2, $3, $4, NOW())`,
+              [eventName, botId, telegramId, JSON.stringify({ type: messageType, messages: payloads.length, medias: medias.length })]
+            );
+            console.info('[START:FUNNEL_EVENT_REGISTERED]', JSON.stringify({
+              botId,
+              telegramId,
+              eventName,
+              timestamp: new Date().toISOString()
+            }));
+          } catch (dbError) {
+            console.error('[ERRO:START:FUNNEL_EVENT]', JSON.stringify({
+              botId,
+              telegramId,
+              eventName,
+              error: dbError.message,
+              code: dbError.code,
+              timestamp: new Date().toISOString()
+            }));
+          }
+        });
       }
+      breakdown.funnelEventLog = Date.now() - t6; // Será ~0ms agora
 
       const duration = Date.now() - startTime;
-      console.info('[START:COMPLETE]', JSON.stringify({
-        botId,
-        telegramId,
-        messageType,
-        payloadCount: payloads.length,
-        mediaCount: medias.length,
-        sentCount: responses.length,
-        latencyMs: duration,
-        success: responses.length > 0,
-        timestamp: new Date().toISOString()
-      }));
+      
+      // Log detalhado com breakdown para análise de performance
+      if (messageType === 'start') {
+        console.info('[START:COMPLETE]', JSON.stringify({
+          botId,
+          telegramId,
+          messageType,
+          payloadCount: payloads.length,
+          mediaCount: medias.length,
+          sentCount: responses.length,
+          latencyMs: duration,
+          success: responses.length > 0,
+          breakdown: {
+            templateLookup: breakdown.templateLookup,
+            mediaResolve: breakdown.mediaResolve,
+            contentRender: breakdown.contentRender,
+            payloadPreparation: breakdown.payloadPreparation,
+            telegramDispatch: breakdown.telegramDispatch,
+            funnelEventLog: breakdown.funnelEventLog
+          },
+          timestamp: new Date().toISOString()
+        }));
+
+        // Log de alerta se alguma fase estiver lenta
+        if (breakdown.templateLookup > 50) {
+          console.warn(`START:SLOW_TEMPLATE_LOOKUP { latencyMs:${breakdown.templateLookup}, botId:${botId} }`);
+        }
+        if (breakdown.mediaResolve > 100) {
+          console.warn(`START:SLOW_MEDIA_RESOLVE { latencyMs:${breakdown.mediaResolve}, mediaCount:${medias.length} }`);
+        }
+        if (breakdown.telegramDispatch > 300) {
+          console.warn(`START:SLOW_TELEGRAM_DISPATCH { latencyMs:${breakdown.telegramDispatch}, payloadCount:${payloads.length} }`);
+        }
+      } else if (messageType === 'downsell') {
+        console.info('[DOWNSELL][SEND][OK]', JSON.stringify({
+          botId,
+          telegramId,
+          payloadCount: payloads.length,
+          mediaCount: medias.length,
+          planCount: plansFromConfig.length,
+          sentCount: responses.length,
+          latencyMs: duration,
+          success: responses.length > 0,
+          breakdown: {
+            templateLookup: breakdown.templateLookup,
+            mediaResolve: breakdown.mediaResolve,
+            contentRender: breakdown.contentRender,
+            payloadPreparation: breakdown.payloadPreparation,
+            telegramDispatch: breakdown.telegramDispatch
+          },
+          timestamp: new Date().toISOString()
+        }));
+      } else {
+        console.info('[MESSAGE:COMPLETE]', JSON.stringify({
+          botId,
+          telegramId,
+          messageType,
+          payloadCount: payloads.length,
+          mediaCount: medias.length,
+          sentCount: responses.length,
+          latencyMs: duration,
+          success: responses.length > 0,
+          timestamp: new Date().toISOString()
+        }));
+      }
 
       return {
         success: responses.length > 0,
@@ -457,7 +575,8 @@ class MessageService {
         messageCount: payloads.length,
         messageType,
         mediaCount: medias.length,
-        responses
+        responses,
+        breakdown
       };
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -467,6 +586,7 @@ class MessageService {
           telegramId,
           reason: error.message,
           latencyMs: duration,
+          breakdown,
           stack: error.stack?.split('\n')[0],
           timestamp: new Date().toISOString()
         }));
@@ -477,12 +597,14 @@ class MessageService {
         telegramId,
         error: error.message,
         latencyMs: duration,
+        breakdown,
         timestamp: new Date().toISOString()
       }));
       return {
         success: false,
         error: error.message,
-        duration
+        duration,
+        breakdown
       };
     }
   }
@@ -688,7 +810,7 @@ class MessageService {
     return null;
   }
 
-  _normalizePlansForKeyboard(plans, botId) {
+  _normalizePlansForKeyboard(plans, botId, sourceKind = null, sourceSlug = null) {
     if (!Array.isArray(plans) || plans.length === 0 || !botId) {
       return [];
     }
@@ -743,7 +865,15 @@ class MessageService {
       }
 
       const label = `${displayName}${suffix}`.slice(0, maxLabelLength);
-      const callbackData = `plan:${botId}:${normalizedId}`;
+      // Incluir origem no callback_data: plan:botId:planId:sourceKind:sourceSlug
+      const callbackData = sourceKind && sourceSlug
+        ? `plan:${botId}:${normalizedId}:${sourceKind}:${sourceSlug}`
+        : `plan:${botId}:${normalizedId}`;
+
+      // Log para debug
+      if (sourceKind) {
+        console.log(`[PLAN:BUTTON:CREATED] { planId:"${normalizedId}", name:"${safeName}", sourceKind:"${sourceKind}", sourceSlug:"${sourceSlug}", callbackData:"${callbackData}" }`);
+      }
 
       normalized.push({
         button: {
@@ -779,12 +909,22 @@ class MessageService {
     const prioritizedMedias = this.prioritizeMedias(validMedias);
     const modeDecision = this.decideMediaMode(mediaMode, prioritizedMedias);
 
+    // Log de mídias inválidas (sem tg_file_id)
+    const invalidCount = originalMedias.length - validMedias.length;
+    if (invalidCount > 0) {
+      const invalidMedias = originalMedias.filter(media => !media || !media.tg_file_id);
+      const invalidReasons = invalidMedias.map(media => {
+        if (!media) return 'null_media';
+        if (!media.tg_file_id) return 'missing_tg_file_id';
+        return 'unknown';
+      });
+      console.warn(`START:MEDIA_INVALID { count:${invalidCount}, total:${originalMedias.length}, reasons:[${invalidReasons.join(',')}] }`);
+    }
+
     console.info(`START:MEDIA_MODE { requested:"${modeDecision.requested}", eligiblePhotoVideo:${modeDecision.eligiblePhotoVideo}, decided:"${modeDecision.decided}" }`);
 
     const orderList = prioritizedMedias.map(media => media.kind).join(',');
-    console.info(`START:MEDIA_ORDER { before:${originalMedias.length}, after_sorted:${prioritizedMedias.length}, order:[${orderList}] }`);
-
-    console.info(`START:CAPTION_POLICY { attach:${attachTextAsCaption ? 'true' : 'false'} }`);
+    console.info(`START:MEDIA_ORDER { before:${originalMedias.length}, valid:${validMedias.length}, after_sorted:${prioritizedMedias.length}, order:[${orderList}] }`);
 
     const textMessages = [];
     if (Array.isArray(renderedContent.messages)) {
@@ -801,11 +941,19 @@ class MessageService {
       textMessages.push(String(renderedContent.text));
     }
 
+    // CORREÇÃO: Nunca aplicar caption em mídias quando há texto separado
+    // Sempre enviar mídias primeiro, depois texto com botões
     let pendingCaption = null;
     let captionSourceForText = null;
     let captionApplied = false;
 
-    if (attachTextAsCaption && prioritizedMedias.length > 0 && textMessages.length > 0) {
+    // Só aplicar caption se attachTextAsCaption=true E não houver texto separado
+    const hasTextMessages = textMessages.length > 0;
+    const shouldUseCaption = attachTextAsCaption && prioritizedMedias.length > 0 && !hasTextMessages;
+
+    console.info(`START:CAPTION_POLICY { attach:${attachTextAsCaption ? 'true' : 'false'}, hasTextMessages:${hasTextMessages}, shouldUseCaption:${shouldUseCaption} }`);
+
+    if (shouldUseCaption && textMessages.length > 0) {
       captionSourceForText = textMessages.shift();
       const captionCandidate = String(captionSourceForText || '').trim();
       pendingCaption = captionCandidate.slice(0, 1024);
@@ -830,13 +978,30 @@ class MessageService {
       }]))
     });
 
-    const originKey = options.origin === 'preview' ? 'PREVIEW' : 'START';
-    const allowPlans = options.origin === 'start' || options.origin === 'preview';
-    const planEntries = allowPlans ? this._normalizePlansForKeyboard(renderedContent?.plans, botId) : [];
+    const originKey = options.origin === 'preview' ? 'PREVIEW' : options.origin === 'downsell' ? 'DOWNSELL' : options.origin === 'shot' ? 'SHOT' : 'START';
+    const allowPlans = options.origin === 'start' || options.origin === 'preview' || options.origin === 'downsell' || options.origin === 'shot';
+    
+    // Determinar sourceKind e sourceSlug baseado na origem
+    let sourceKind = null;
+    let sourceSlug = null;
+    if (options.origin === 'start') {
+      sourceKind = 'start';
+      sourceSlug = 'start';
+    } else if (options.origin === 'downsell' && options.downsellSlug) {
+      sourceKind = 'downsell';
+      sourceSlug = options.downsellSlug;
+    } else if (options.origin === 'shot' && options.shotSlug) {
+      sourceKind = 'shot';
+      sourceSlug = options.shotSlug;
+    }
+    
+    const planEntries = allowPlans ? this._normalizePlansForKeyboard(renderedContent?.plans, botId, sourceKind, sourceSlug) : [];
     let planKeyboardContext = null;
 
     if (planEntries.length > 0) {
-      const planLayout = this._resolvePlanLayout(renderedContent?.planLayout);
+      // Forçar layout 'list' para shots e downsells
+      const forceListLayout = options.origin === 'shot' || options.origin === 'downsell';
+      const planLayout = forceListLayout ? 'list' : this._resolvePlanLayout(renderedContent?.planLayout);
       const planColumns = this._resolvePlanColumns(renderedContent?.planColumns, planLayout);
       const planButtons = planEntries.map(entry => entry.button);
       const rows = [];
@@ -888,7 +1053,6 @@ class MessageService {
         const caption = applyCaption();
         if (caption) {
           payload.caption = caption;
-          payload.parse_mode = 'MarkdownV2';
         }
       }
 
@@ -896,16 +1060,19 @@ class MessageService {
       payloads.push(payload);
     };
 
+    // CORREÇÃO: Enviar TODAS as mídias primeiro, SEM caption quando há texto separado
     if (modeDecision.decided === 'group') {
       const processed = new Set();
 
+      // 1. Enviar áudios primeiro (sempre individual)
       prioritizedMedias.forEach(media => {
         if (media.kind === 'audio') {
-          pushSingleMedia(media, false);
+          pushSingleMedia(media, false); // NUNCA caption em áudio quando há texto
           processed.add(media);
         }
       });
 
+      // 2. Enviar fotos/vídeos em álbum
       const groupableMedias = prioritizedMedias.filter(media => ['photo', 'video'].includes(media.kind));
       const albumMedias = groupableMedias.slice(0, 10);
 
@@ -918,11 +1085,12 @@ class MessageService {
               media: media.tg_file_id
             };
 
-            if (index === 0) {
+            // CORREÇÃO: Só aplicar caption se não houver texto separado
+            if (index === 0 && !hasTextMessages) {
               const caption = applyCaption();
               if (caption) {
                 item.caption = caption;
-                item.parse_mode = 'MarkdownV2';
+                // parse_mode removido - caption sem formatação não precisa
               }
             }
 
@@ -935,16 +1103,20 @@ class MessageService {
         albumMedias.forEach(media => processed.add(media));
       }
 
+      // 3. Enviar outras mídias (documentos, etc)
       prioritizedMedias.forEach(media => {
         if (processed.has(media)) {
           return;
         }
-        pushSingleMedia(media, false);
+        pushSingleMedia(media, false); // NUNCA caption quando há texto separado
         processed.add(media);
       });
     } else {
+      // Modo single: enviar todas as mídias individualmente, SEM caption
       prioritizedMedias.forEach((media, index) => {
-        pushSingleMedia(media, index === 0);
+        // CORREÇÃO: Só aplicar caption na primeira mídia se não houver texto separado
+        const allowCaption = index === 0 && !hasTextMessages;
+        pushSingleMedia(media, allowCaption);
       });
     }
 
@@ -964,8 +1136,8 @@ class MessageService {
 
       const textPayload = {
         chat_id: telegramId,
-        text: trimmedText,
-        parse_mode: 'MarkdownV2'
+        text: trimmedText
+        // parse_mode removido - texto sem formatação não precisa
       };
 
       textPayload.__meta = { type: 'text', index: textIndex, length: trimmedText.length };
@@ -1004,7 +1176,7 @@ class MessageService {
         const finalPayload = {
           chat_id: telegramId,
           text: finalText,
-          parse_mode: 'MarkdownV2',
+          // parse_mode removido - texto sem formatação não precisa
           reply_markup: planKeyboardContext.markup
         };
         finalPayload.__meta = {
@@ -1046,6 +1218,7 @@ class MessageService {
       buttonsAttached = true;
     }
 
+    // CORREÇÃO: Adicionar textos APÓS todas as mídias
     textPayloads.forEach(payload => {
       payloads.push(payload);
     });
@@ -1059,13 +1232,17 @@ class MessageService {
         const buttonsPayload = {
           chat_id: telegramId,
           text: ' ',
-          reply_markup: buildFallbackReplyMarkup(),
-          parse_mode: 'MarkdownV2'
+          reply_markup: buildFallbackReplyMarkup()
+          // parse_mode removido - texto sem formatação não precisa
         };
         buttonsPayload.__meta = { type: 'text', index: textIndex, length: 1 };
         payloads.push(buttonsPayload);
       }
     }
+
+    // Log da ordem final dos payloads
+    const payloadOrder = payloads.map((p, i) => `${i+1}:${p.__meta?.type || 'unknown'}`).join(' → ');
+    console.info(`START:PAYLOAD_ORDER { sequence:"${payloadOrder}", total:${payloads.length} }`);
 
     return payloads;
   }
@@ -1078,70 +1255,154 @@ class MessageService {
     }
 
     const originLabel = options.origin === 'preview' ? 'PREVIEW' : 'START';
+    const dispatchStart = Date.now();
 
-    for (let i = 0; i < payloads.length; i++) {
-      const payload = payloads[i];
-      const meta = payload.__meta || {};
-      const { __meta, ...apiPayload } = payload;
-      let response;
+    // Rate limiting: máx 5 mensagens por segundo (conforme Telegram limits)
+    const RATE_LIMIT = 5; // msg/s
+    const CHUNK_DELAY = 1000; // 1s entre chunks
 
-      try {
-        response = await this.sendViaTelegramAPI(botToken, apiPayload);
-      } catch (error) {
-        response = { ok: false, error: error.message };
+    // Dividir payloads em chunks de 5 para respeitar rate limit
+    const chunks = [];
+    for (let i = 0; i < payloads.length; i += RATE_LIMIT) {
+      chunks.push(payloads.slice(i, i + RATE_LIMIT));
+    }
+
+    console.info(`${originLabel}:DISPATCH_START { payloads:${payloads.length}, chunks:${chunks.length}, rateLimitPerSec:${RATE_LIMIT} }`);
+
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      const chunk = chunks[chunkIndex];
+      const chunkStart = Date.now();
+
+      // CORREÇÃO: Separar mídias de texto para garantir ordem
+      const mediaPayloads = chunk.filter(p => p.__meta?.type === 'media-single' || p.__meta?.type === 'group');
+      const textPayloads = chunk.filter(p => p.__meta?.type === 'text');
+
+      console.info(`${originLabel}:CHUNK_SPLIT { chunk:${chunkIndex + 1}, media:${mediaPayloads.length}, text:${textPayloads.length} }`);
+
+      // 1. Enviar TODAS as mídias primeiro (OTIMIZAÇÃO: verdadeiro paralelo com Promise.allSettled)
+      if (mediaPayloads.length > 0) {
+        const mediaPromises = mediaPayloads.map(async (payload, indexInChunk) => {
+          const globalIndex = chunkIndex * RATE_LIMIT + indexInChunk;
+          const meta = payload.__meta || {};
+          const { __meta, ...apiPayload } = payload;
+          
+          let response;
+          const sendStart = Date.now();
+
+          try {
+            // OTIMIZAÇÃO: Não aguardar erros, continuar enviando
+            response = await this.sendViaTelegramAPI(botToken, apiPayload);
+          } catch (error) {
+            response = { ok: false, error: error.message };
+          }
+
+          const sendDuration = Date.now() - sendStart;
+          const safeError = response && response.error ? response.error.replace(/"/g, '\"') : null;
+          const count = meta.count || (Array.isArray(apiPayload.media) ? apiPayload.media.length : 0);
+          const singleIndex = meta.index ?? globalIndex;
+
+          // Logs específicos por tipo de payload
+          if (meta.type === 'group') {
+            if (response.ok) {
+              console.info(`${originLabel}:SEND:GROUP { count:${count}, sent:true, latencyMs:${sendDuration} }`);
+            } else {
+              console.warn(`${originLabel}:SEND:GROUP { count:${count}, sent:false, latencyMs:${sendDuration}${safeError ? `, error:"${safeError}"` : ''} }`);
+            }
+          } else if (meta.type === 'media-single') {
+            const kind = meta.kind || 'unknown';
+            if (response.ok) {
+              console.info(`${originLabel}:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:true, latencyMs:${sendDuration} }`);
+            } else {
+              console.warn(`${originLabel}:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:false, latencyMs:${sendDuration}${safeError ? `, error:"${safeError}"` : ''} }`);
+            }
+          }
+
+          return { ...response, meta, sendDuration, globalIndex };
+        });
+
+        // OTIMIZAÇÃO: Promise.allSettled ao invés de Promise.all
+        // Se 1 vídeo falhar, os outros continuam sendo enviados
+        const mediaResults = await Promise.allSettled(mediaPromises);
+        const mediaResponses = mediaResults.map(result => 
+          result.status === 'fulfilled' ? result.value : { ok: false, error: 'Promise rejected', meta: {} }
+        );
+        responses.push(...mediaResponses);
+        
+        const successCount = mediaResponses.filter(r => r.ok).length;
+        const failCount = mediaResponses.length - successCount;
+        console.info(`${originLabel}:MEDIA_BATCH_COMPLETE { count:${mediaPayloads.length}, success:${successCount}, failed:${failCount} }`);
       }
 
-      const safeError = response && response.error ? response.error.replace(/"/g, '\"') : null;
-      const count = meta.count || (Array.isArray(apiPayload.media) ? apiPayload.media.length : 0);
-      const singleIndex = meta.index ?? i;
-      const textLength = meta.length ?? (apiPayload.text ? apiPayload.text.length : 0);
+      // 2. Depois enviar textos (sequencial para manter ordem)
+      if (textPayloads.length > 0) {
+        for (let i = 0; i < textPayloads.length; i++) {
+          const payload = textPayloads[i];
+          const globalIndex = chunkIndex * RATE_LIMIT + mediaPayloads.length + i;
+          const meta = payload.__meta || {};
+          const { __meta, ...apiPayload } = payload;
+          
+          let response;
+          const sendStart = Date.now();
 
-      if (meta.type === 'group') {
-        if (response.ok) {
-          console.info(`START:SEND:GROUP { count:${count}, sent:true }`);
-        } else {
-          console.warn(`START:SEND:GROUP { count:${count}, sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
+          try {
+            response = await this.sendViaTelegramAPI(botToken, apiPayload);
+          } catch (error) {
+            response = { ok: false, error: error.message };
+          }
+
+          const sendDuration = Date.now() - sendStart;
+          const safeError = response && response.error ? response.error.replace(/"/g, '\"') : null;
+          const singleIndex = meta.index ?? globalIndex;
+          const textLength = meta.length ?? (apiPayload.text ? apiPayload.text.length : 0);
+
+          if (response.ok) {
+            console.info(`${originLabel}:TEXT_SEND { index:${singleIndex}, len:${textLength}, sent:true, latencyMs:${sendDuration} }`);
+          } else {
+            console.warn(`${originLabel}:TEXT_SEND { index:${singleIndex}, len:${textLength}, sent:false, latencyMs:${sendDuration}${safeError ? `, error:"${safeError}"` : ''} }`);
+          }
+
+          // Log de planos anexados
+          if (meta.planCarrier && meta.planCount && response.ok) {
+            if (meta.planLogOnDispatch !== false) {
+              const messageId = response.message_id
+                || (Array.isArray(response.message_ids) && response.message_ids.length > 0
+                  ? response.message_ids[0]
+                  : null);
+              const toMessage = messageId !== null ? messageId : 'unknown';
+              console.info(`${originLabel}:PLANS_ATTACHED`, JSON.stringify({
+                toMessage,
+                planCount: meta.planCount
+              }));
+            }
+          }
+
+          responses.push({ ...response, meta, sendDuration, globalIndex });
+
+          // Pequeno delay entre textos se houver múltiplos
+          if (i < textPayloads.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
         }
-      } else if (meta.type === 'media-single') {
-        const kind = meta.kind || 'unknown';
-        if (response.ok) {
-          console.info(`START:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:true }`);
-        } else {
-          console.warn(`START:SEND:SINGLE { index:${singleIndex}, kind:"${kind}", sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
-        }
-      } else if (meta.type === 'text') {
-        if (response.ok) {
-          console.info(`START:TEXT_SEND { index:${singleIndex}, len:${textLength} }`);
-        } else {
-          console.warn(`START:TEXT_SEND { index:${singleIndex}, len:${textLength}, sent:false${safeError ? `, error:"${safeError}"` : ''} }`);
-        }
+        console.info(`${originLabel}:TEXT_BATCH_COMPLETE { count:${textPayloads.length} }`);
       }
 
-      if (meta.planCarrier && meta.planCount && response.ok) {
-        if (meta.planLogOnDispatch !== false) {
-          const messageId = response.message_id
-            || (Array.isArray(response.message_ids) && response.message_ids.length > 0
-              ? response.message_ids[0]
-              : null);
-          const toMessage = messageId !== null ? messageId : 'unknown';
-          console.info(`${originLabel}:PLANS_ATTACHED`, JSON.stringify({
-            toMessage,
-            planCount: meta.planCount
-          }));
-        }
-      }
+      const chunkDuration = Date.now() - chunkStart;
+      console.info(`${originLabel}:CHUNK_COMPLETE { chunk:${chunkIndex + 1}/${chunks.length}, payloads:${chunk.length}, latencyMs:${chunkDuration} }`);
 
-      responses.push({ ...response, meta });
-
-      if (i < payloads.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+      // Delay entre chunks (exceto no último)
+      if (chunkIndex < chunks.length - 1) {
+        console.info(`${originLabel}:RATE_LIMIT_WAIT { delayMs:${CHUNK_DELAY} }`);
+        await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY));
       }
     }
 
-    return { responses };
+    const totalDispatchDuration = Date.now() - dispatchStart;
+    console.info(`${originLabel}:DISPATCH_COMPLETE { totalPayloads:${payloads.length}, totalLatencyMs:${totalDispatchDuration}, avgPerPayload:${Math.round(totalDispatchDuration / payloads.length)}ms }`);
+
+    return { responses, totalDispatchDuration };
   }
 
-  async getPlanMetadata(botId, planIdentifier) {
+  async getPlanMetadata(botId, planIdentifier, sourceKind = 'start', sourceSlug = null) {
     if (!botId || planIdentifier === undefined || planIdentifier === null) {
       return null;
     }
@@ -1152,18 +1413,84 @@ class MessageService {
     }
 
     try {
-      const template = await this.getMessageTemplate(botId, 'start');
+      // Determinar de onde buscar o plano baseado na origem
+      let template;
+      let specificId = null;
+      
+      if (sourceKind === 'downsell' && sourceSlug) {
+        // Buscar do downsell específico
+        const downsellResult = await this.pool.query(
+          'SELECT id FROM bot_downsells WHERE bot_id = $1 AND slug = $2 LIMIT 1',
+          [botId, sourceSlug]
+        );
+        if (downsellResult.rows.length > 0) {
+          specificId = downsellResult.rows[0].id;
+          template = await this.getMessageTemplate(botId, 'downsell', specificId);
+        }
+      } else if (sourceKind === 'shot' && sourceSlug) {
+        // Buscar do shot específico
+        const shotResult = await this.pool.query(
+          'SELECT id FROM shots WHERE bot_id = $1 AND slug = $2 LIMIT 1',
+          [botId, sourceSlug]
+        );
+        if (shotResult.rows.length > 0) {
+          specificId = shotResult.rows[0].id;
+          template = await this.getMessageTemplate(botId, 'shot', specificId);
+        } else {
+          // Shot não encontrado (provavelmente foi deletado após envio)
+          // Buscar planos do histórico
+          console.log(`[PLAN:METADATA:SHOT_NOT_FOUND] Buscando em shot_plans_history { botId:${botId}, shotSlug:"${sourceSlug}" }`);
+          
+          const historyResult = await this.pool.query(
+            `SELECT plans FROM shot_plans_history 
+             WHERE bot_id = $1 AND shot_slug = $2 
+             ORDER BY deleted_at DESC 
+             LIMIT 1`,
+            [botId, sourceSlug]
+          );
+          
+          if (historyResult.rows.length > 0) {
+            const plans = typeof historyResult.rows[0].plans === 'string'
+              ? JSON.parse(historyResult.rows[0].plans)
+              : historyResult.rows[0].plans;
+            
+            // Criar template fake apenas com os planos
+            template = {
+              id: null,
+              bot_id: botId,
+              slug: sourceSlug,
+              content: {
+                plans: Array.isArray(plans) ? plans : []
+              }
+            };
+            
+            console.log(`[PLAN:METADATA:FOUND_IN_HISTORY] { botId:${botId}, shotSlug:"${sourceSlug}", plansCount:${template.content.plans.length} }`);
+          }
+        }
+      } else {
+        // Buscar do /start (padrão)
+        template = await this.getMessageTemplate(botId, 'start');
+      }
+
       if (!template || !Array.isArray(template.content?.plans)) {
+        console.warn(`[PLAN:METADATA:NOT_FOUND] { botId:${botId}, planId:"${normalizedId}", sourceKind:"${sourceKind}", sourceSlug:"${sourceSlug}" }`);
         return null;
       }
 
       const normalizedPlans = this._normalizePlansForKeyboard(template.content.plans, botId);
       const match = normalizedPlans.find(entry => entry.meta.normalizedId === normalizedId);
 
+      if (match) {
+        console.log(`[PLAN:METADATA:FOUND] { botId:${botId}, planId:"${normalizedId}", planName:"${match.meta.name}", sourceKind:"${sourceKind}", sourceSlug:"${sourceSlug}" }`);
+      }
+
       return match ? match.meta : null;
     } catch (error) {
       console.error('[ERRO:PLAN:METADATA]', JSON.stringify({
         botId,
+        planIdentifier,
+        sourceKind,
+        sourceSlug,
         error: error.message
       }));
       return null;
@@ -1198,7 +1525,7 @@ class MessageService {
     // Adicionar texto se houver
     if (trimmedText) {
       payload.text = trimmedText;
-      payload.parse_mode = 'MarkdownV2'; // Usar MarkdownV2 que é mais seguro
+      // parse_mode removido - texto sem formatação não precisa
     }
 
     // Se houver mídia, preparar para envio
@@ -1217,8 +1544,8 @@ class MessageService {
             payload.media = groupableMedias.slice(0, 10).map((media, index) => ({
               type: this.mapMediaKindToTelegramType(media.kind),
               media: media.tg_file_id,
-              caption: index === 0 && attachTextAsCaption && trimmedText ? trimmedText : undefined,
-              parse_mode: (index === 0 && attachTextAsCaption && trimmedText) ? 'MarkdownV2' : undefined
+              caption: index === 0 && attachTextAsCaption && trimmedText ? trimmedText : undefined
+              // parse_mode removido - caption sem formatação não precisa
             }));
           }
         } else {
@@ -1304,6 +1631,7 @@ class MessageService {
    * - sendMessage (payload.text)
    * 
    * CP-4/5: Respeita modo group/single
+   * Aplica rate limiting por chat (5 msg/s) e global (20 msg/s)
    */
   async sendViaTelegramAPI(botToken, payload) {
     if (!botToken) {
@@ -1314,15 +1642,38 @@ class MessageService {
       throw new Error('Payload vazio - nenhum conteúdo para enviar');
     }
 
+    const chatId = payload.chat_id;
+
     try {
+      // Aplicar rate limiting antes de enviar
+      const rateLimitResult = await this.rateLimiter.acquireToken(chatId);
+      if (rateLimitResult.waitedMs > 0) {
+        console.info('[RATE_LIMIT][WAIT]', {
+          chatId,
+          waitedMs: rateLimitResult.waitedMs,
+          globalTokens: rateLimitResult.globalTokens,
+          chatTokens: rateLimitResult.chatTokens
+        });
+      }
+
       const axios = require('axios');
+      
       const apiUrl = `https://api.telegram.org/bot${botToken}`;
+      const axiosConfig = {
+        timeout: 10000,  // ↑ 3s → 10s (vídeos grandes precisam de mais tempo)
+        validateStatus: () => true,
+        httpsAgent: GLOBAL_HTTPS_AGENT,
+        headers: {
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=60, max=200'  // ↑ timeout 30s→60s, max 100→200
+        }
+      };
 
       if (payload.media && Array.isArray(payload.media) && payload.media.length > 0) {
         const response = await axios.post(`${apiUrl}/sendMediaGroup`, {
           chat_id: payload.chat_id,
           media: payload.media
-        }, { timeout: 5000, validateStatus: () => true });
+        }, axiosConfig);
 
         if (response.data?.ok) {
           return {
@@ -1332,10 +1683,30 @@ class MessageService {
         }
 
         const errorDesc = response.data?.description || 'Unknown error';
+        
+        // Tratar erro 429 (Too Many Requests)
+        if (response.status === 429) {
+          const retryAfter = response.data?.parameters?.retry_after || null;
+          this.rateLimiter.register429(chatId, retryAfter);
+          
+          console.warn('[TELEGRAM][RATE_LIMIT][429]', {
+            scope: 'global',
+            chatId,
+            retryAfter,
+            method: 'sendMediaGroup'
+          });
+        }
+        
+        console.error('[TELEGRAM_API_ERROR:sendMediaGroup]', JSON.stringify({
+          status: response.status,
+          description: errorDesc,
+          payload: { media_count: payload.media?.length, chat_id: payload.chat_id }
+        }));
         return {
           ok: false,
           status: response.status,
-          error: this._sanitizeTelegramError(errorDesc)
+          error: this._sanitizeTelegramError(errorDesc),
+          raw_error: errorDesc
         };
       }
 
@@ -1353,19 +1724,14 @@ class MessageService {
 
         if (payload.caption) {
           sendPayload.caption = payload.caption;
-          sendPayload.parse_mode = payload.parse_mode || 'MarkdownV2';
-        } else if (payload.parse_mode) {
-          sendPayload.parse_mode = payload.parse_mode;
+          // parse_mode removido - caption sem formatação não precisa
         }
 
         if (payload.reply_markup) {
           sendPayload.reply_markup = payload.reply_markup;
         }
 
-        const response = await axios.post(`${apiUrl}/${method}`, sendPayload, {
-          timeout: 5000,
-          validateStatus: () => true
-        });
+        const response = await axios.post(`${apiUrl}/${method}`, sendPayload, axiosConfig);
 
         if (response.data?.ok) {
           return {
@@ -1375,10 +1741,30 @@ class MessageService {
         }
 
         const errorDesc = response.data?.description || 'Unknown error';
+        
+        // Tratar erro 429 (Too Many Requests)
+        if (response.status === 429) {
+          const retryAfter = response.data?.parameters?.retry_after || null;
+          this.rateLimiter.register429(chatId, retryAfter);
+          
+          console.warn('[TELEGRAM][RATE_LIMIT][429]', {
+            scope: 'chat',
+            chatId,
+            retryAfter,
+            method
+          });
+        }
+        
+        console.error(`[TELEGRAM_API_ERROR:${method}]`, JSON.stringify({
+          status: response.status,
+          description: errorDesc,
+          payload: { field, has_caption: Boolean(payload.caption), has_reply_markup: Boolean(payload.reply_markup), parse_mode: payload.parse_mode }
+        }));
         return {
           ok: false,
           status: response.status,
-          error: this._sanitizeTelegramError(errorDesc)
+          error: this._sanitizeTelegramError(errorDesc),
+          raw_error: errorDesc
         };
       }
 
@@ -1391,18 +1777,13 @@ class MessageService {
         text: payload.text
       };
 
-      if (payload.parse_mode) {
-        sendPayload.parse_mode = payload.parse_mode;
-      }
+      // parse_mode removido - texto sem formatação não precisa
 
       if (payload.reply_markup) {
         sendPayload.reply_markup = payload.reply_markup;
       }
 
-      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, {
-        timeout: 5000,
-        validateStatus: () => true
-      });
+      const response = await axios.post(`${apiUrl}/sendMessage`, sendPayload, axiosConfig);
 
       if (response.data?.ok) {
         return {
@@ -1412,10 +1793,30 @@ class MessageService {
       }
 
       const errorDesc = response.data?.description || 'Unknown error';
+      
+      // Tratar erro 429 (Too Many Requests)
+      if (response.status === 429) {
+        const retryAfter = response.data?.parameters?.retry_after || null;
+        this.rateLimiter.register429(chatId, retryAfter);
+        
+        console.warn('[TELEGRAM][RATE_LIMIT][429]', {
+          scope: 'chat',
+          chatId,
+          retryAfter,
+          method: 'sendMessage'
+        });
+      }
+      
+      console.error('[TELEGRAM_API_ERROR:sendMessage]', JSON.stringify({
+        status: response.status,
+        description: errorDesc,
+        payload: { text_length: payload.text?.length, has_reply_markup: Boolean(payload.reply_markup), parse_mode: payload.parse_mode }
+      }));
       return {
         ok: false,
         status: response.status,
-        error: this._sanitizeTelegramError(errorDesc)
+        error: this._sanitizeTelegramError(errorDesc),
+        raw_error: errorDesc
       };
     } catch (error) {
       return { ok: false, error: error.message };

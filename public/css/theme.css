@@ -719,3 +719,171 @@ input[type="radio"] {
     width: 100%;
   }
 }
+
+/* Downsell/Shot Sections */
+.downsell-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+
+.downsell-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.downsell-section-header label {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.downsell-plans-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.downsell-plan-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  transition: all 0.3s ease;
+}
+
+.downsell-plan-card:hover {
+  border-color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+
+.downsell-plan-info {
+  flex: 1;
+}
+
+.downsell-plan-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.downsell-plan-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.config-item-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.downsell-media-preview {
+  min-height: 60px;
+}
+
+.downsell-media-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  transition: all 0.3s ease;
+}
+
+.downsell-media-card:hover {
+  border-color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+
+.downsell-media-icon {
+  font-size: 24px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+}
+
+.downsell-media-info {
+  flex: 1;
+}
+
+.downsell-media-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.downsell-media-type {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-transform: capitalize;
+}
+
+.empty-state-small {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.empty-state-small p {
+  margin: 0;
+  color: var(--text-tertiary);
+}
+
+/* Trigger Toggle Group */
+.trigger-toggle-group {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Modal Large */
+.modal-content-large {
+  max-width: 700px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+/* Date and Time Inputs */
+input[type="date"],
+input[type="time"],
+input[type="number"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+input[type="date"]:focus,
+input[type="time"]:focus,
+input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(29, 205, 159, 0.1);
+  background: var(--bg-tertiary);
+}
+
+/* Custom date picker styling for dark theme */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+}

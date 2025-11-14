@@ -323,6 +323,119 @@
       margin-bottom: 30px;
     }
 
+    /* Estilos para tab Controle */
+    .control-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 30px;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+
+    .control-filters {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .control-period-select {
+      padding: 10px 16px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+
+    .control-period-select:focus {
+      outline: none;
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 3px rgba(29, 205, 159, 0.1);
+    }
+
+    .kpi-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      margin-bottom: 30px;
+    }
+
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: var(--accent-primary);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .kpi-card:hover {
+      transform: translateY(-4px);
+      box-shadow: var(--shadow-lg);
+    }
+
+    .kpi-card:hover::before {
+      opacity: 1;
+    }
+
+    .kpi-card-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+
+    .kpi-card-value {
+      font-size: 36px;
+      font-weight: 700;
+      color: var(--accent-primary);
+      margin-bottom: 8px;
+      line-height: 1;
+    }
+
+    .kpi-card-subtitle {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      line-height: 1.5;
+    }
+
+    .kpi-loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 150px;
+      grid-column: 1 / -1;
+    }
+
+    .kpi-loading .spinner {
+      margin-bottom: 16px;
+    }
+
+    .kpi-loading p {
+      color: var(--text-tertiary);
+      font-size: 14px;
+    }
+
     /* Estilos para seções de configuração */
     .config-section {
       margin-bottom: 40px;
@@ -506,6 +619,134 @@
       font-size: 11px;
     }
 
+    /* Estilos específicos para modal de Downsell */
+    .modal-content-large {
+      max-width: 700px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+
+    .trigger-toggle-group {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .trigger-option {
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .downsell-section {
+      margin-bottom: 24px;
+      padding: 20px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+    }
+
+    .downsell-section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .downsell-section-header label {
+      font-weight: 600;
+      color: var(--accent-primary);
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .downsell-plans-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .downsell-plan-card {
+      background: var(--bg-primary);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .downsell-plan-info {
+      flex: 1;
+    }
+
+    .downsell-plan-name {
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+
+    .downsell-plan-meta {
+      font-size: 11px;
+      color: var(--text-tertiary);
+    }
+
+    .downsell-media-preview {
+      min-height: 60px;
+    }
+
+    .downsell-media-card {
+      background: var(--bg-primary);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .downsell-media-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--accent-primary);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--bg-primary);
+      font-weight: bold;
+      font-size: 12px;
+    }
+
+    .downsell-media-info {
+      flex: 1;
+    }
+
+    .downsell-media-name {
+      font-weight: 500;
+      color: var(--text-primary);
+      font-size: 13px;
+      margin-bottom: 2px;
+    }
+
+    .downsell-media-type {
+      color: var(--text-tertiary);
+      font-size: 11px;
+    }
+
+    .empty-state-small {
+      text-align: center;
+      padding: 20px;
+      color: var(--text-tertiary);
+      font-size: 12px;
+    }
+
+    .empty-state-small p {
+      margin: 0;
+      font-size: 12px;
+    }
+
     @media (max-width: 768px) {
       .page-wrapper {
         padding: 20px 12px;
@@ -542,6 +783,123 @@
         grid-template-columns: 1fr;
         gap: 8px;
       }
+
+      .modal-content-large {
+        max-width: 95%;
+      }
+
+      .trigger-option {
+        min-width: 100%;
+      }
+
+      .downsell-section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+    }
+
+    /* Estilos para aba de Usuários */
+    .users-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+
+    .users-table thead {
+      background: var(--bg-secondary);
+      border-bottom: 2px solid var(--card-border);
+    }
+
+    .users-table th {
+      padding: 12px 16px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .users-table tbody tr {
+      border-bottom: 1px solid var(--card-border);
+      transition: background 0.2s ease;
+    }
+
+    .users-table tbody tr:hover {
+      background: var(--bg-secondary);
+    }
+
+    .users-table td {
+      padding: 16px;
+      font-size: 14px;
+      color: var(--text-primary);
+    }
+
+    .user-name {
+      font-weight: 500;
+      color: var(--accent-primary);
+    }
+
+    .user-value {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .user-origin {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .user-status {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .user-status.paid {
+      background: rgba(29, 205, 159, 0.15);
+      color: var(--accent-primary);
+    }
+
+    .user-status.refunded {
+      background: rgba(255, 107, 107, 0.15);
+      color: #ff6b6b;
+    }
+
+    .btn-analyze {
+      padding: 6px 12px;
+      font-size: 12px;
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-analyze:hover {
+      background: var(--card-border);
+      color: var(--text-primary);
+    }
+
+    .empty-users {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-tertiary);
+    }
+
+    .empty-users h3 {
+      font-size: 18px;
+      margin-bottom: 8px;
+      color: var(--text-secondary);
+    }
+
+    .empty-users p {
+      font-size: 14px;
     }
   </style>
 </head>
@@ -605,16 +963,48 @@
       <!-- Tabs Container -->
       <div id="tabsContainer" class="tabs-container" style="display: none;">
         <div class="tabs-header">
-          <button class="tab-button active" onclick="switchTab('start')">Mensagem /start</button>
+          <button class="tab-button active" onclick="switchTab('control')">Controle</button>
+          <button class="tab-button" onclick="switchTab('start')">Mensagem /start</button>
           <button class="tab-button" onclick="switchTab('downsells')">Downsells</button>
           <button class="tab-button" onclick="switchTab('shots')">Shots</button>
           <button class="tab-button" onclick="switchTab('media')">Mídia</button>
-          <button class="tab-button" onclick="switchTab('integrations')">Integrações</button>
+          <button class="tab-button" onclick="switchTab('users')">Usuários</button>
         </div>
 
         <div class="tabs-content">
+          <!-- Tab: Controle -->
+          <div id="tab-control" class="tab-pane active">
+            <div class="control-header">
+              <h2 class="section-title">Controle do bot <span id="controlBotSlug"></span></h2>
+              <div class="control-filters">
+                <select id="controlPeriod" class="control-period-select" onchange="loadControlKPIs()">
+                  <option value="7">Últimos 7 dias</option>
+                  <option value="30" selected>Últimos 30 dias</option>
+                  <option value="90">Últimos 90 dias</option>
+                  <option value="all">Tudo</option>
+                </select>
+                <button type="button" class="btn-secondary btn-small" onclick="loadControlKPIs()">🔄 Atualizar</button>
+              </div>
+            </div>
+
+            <!-- KPI Cards -->
+            <div id="kpiCardsContainer" class="kpi-cards-grid">
+              <!-- Loading state -->
+              <div class="kpi-card kpi-loading">
+                <div class="spinner"></div>
+                <p>Carregando...</p>
+              </div>
+            </div>
+
+            <!-- Error state -->
+            <div id="kpiErrorState" class="error-state" style="display: none;">
+              <p id="kpiErrorMessage">Falha ao carregar KPIs</p>
+              <button type="button" class="btn-secondary" onclick="loadControlKPIs()">Tentar de novo</button>
+            </div>
+          </div>
+
           <!-- Tab: Mensagem /start -->
-          <div id="tab-start" class="tab-pane active">
+          <div id="tab-start" class="tab-pane">
             <div class="section-title">Mensagem inicial (/start)</div>
             <p style="color: var(--text-secondary); margin-bottom: 30px;">
               Esta é a primeira mensagem que o usuário recebe ao iniciar o bot.
@@ -743,24 +1133,17 @@
             </div>
           </div>
 
-          <!-- Tab: Integrações -->
-          <div id="tab-integrations" class="tab-pane">
-            <div class="section-title">Integrações Externas</div>
+          <!-- Tab: Usuários -->
+          <div id="tab-users" class="tab-pane">
+            <div class="section-title">Usuários Pagantes</div>
             <p style="color: var(--text-secondary); margin-bottom: 20px;">
-              Conecte com UTMify e Facebook CAPI para rastreamento avançado.
+              Lista de usuários que realizaram pagamentos neste bot.
             </p>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-              <div class="stub-section">
-                <p><strong>UTMify</strong></p>
-                <p style="font-size: 12px; margin-top: 8px;">Rastreamento de campanhas</p>
-                <button type="button" class="btn-secondary" style="margin-top: 12px; width: 100%;">Configurar</button>
-              </div>
-
-              <div class="stub-section">
-                <p><strong>Facebook CAPI</strong></p>
-                <p style="font-size: 12px; margin-top: 8px;">Conversão de eventos</p>
-                <button type="button" class="btn-secondary" style="margin-top: 12px; width: 100%;">Configurar</button>
+            <div id="usersListContainer">
+              <div class="loading">
+                <div class="spinner"></div>
+                <p>Carregando usuários...</p>
               </div>
             </div>
           </div>
@@ -771,7 +1154,7 @@
 
   <!-- Modal: Adicionar/Editar Downsell -->
   <div id="downsellModal" class="modal">
-    <div class="modal-content">
+    <div class="modal-content modal-content-large">
       <div class="modal-header">
         <h2 id="downsellModalTitle">Adicionar Downsell</h2>
         <button class="modal-close" onclick="closeDownsellModal()">×</button>
@@ -785,16 +1168,57 @@
           <small>Identificador único para este downsell</small>
         </div>
 
+        <!-- Gatilho do Downsell -->
         <div class="form-group">
-          <label for="downsellDelay">Delay (segundos) *</label>
-          <input type="number" id="downsellDelay" name="delay_seconds" placeholder="ex: 3600" min="0" required>
-          <small>Tempo de espera antes de enviar (em segundos)</small>
+          <label>Gatilho do Downsell *</label>
+          <div class="trigger-toggle-group">
+            <button type="button" class="btn-pill trigger-option active" data-trigger="start" onclick="selectDownsellTrigger('start')">
+              🚀 A partir do /start
+            </button>
+            <button type="button" class="btn-pill trigger-option" data-trigger="pix_created" onclick="selectDownsellTrigger('pix_created')">
+              💳 Após gerar o PIX
+            </button>
+          </div>
+          <input type="hidden" id="downsellTrigger" name="trigger_type" value="start">
+          <small>Define quando este downsell será disparado</small>
+        </div>
+
+        <div class="form-group">
+          <label for="downsellDelay">Delay (minutos) *</label>
+          <input type="number" id="downsellDelay" name="delay_minutes" placeholder="ex: 60" min="1" required>
+          <small>Tempo de espera antes de enviar (em minutos)</small>
         </div>
 
         <div class="form-group">
           <label for="downsellContent">Conteúdo da Mensagem *</label>
           <textarea id="downsellContent" name="content" placeholder="Digite a mensagem..." required></textarea>
           <small>Suporta templates: {user_name}, {user_id}, {bot_name}</small>
+        </div>
+
+        <!-- Seção de Planos do Downsell -->
+        <div class="downsell-section">
+          <div class="downsell-section-header">
+            <label>Plano(s) deste Downsell (máx. 10)</label>
+            <button type="button" id="addDownsellPlanBtn" class="btn-secondary btn-small" onclick="addDownsellPlan()">+ Adicionar plano</button>
+          </div>
+          <div id="downsellPlansList" class="downsell-plans-list">
+            <div class="empty-state-small">
+              <p>Nenhum plano configurado</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Seção de Mídia do Downsell -->
+        <div class="downsell-section">
+          <div class="downsell-section-header">
+            <label>Mídia do Downsell (opcional, máx. 1)</label>
+            <button type="button" id="selectDownsellMediaBtn" class="btn-secondary btn-small" onclick="selectDownsellMedia()">📎 Selecionar mídia</button>
+          </div>
+          <div id="downsellMediaPreview" class="downsell-media-preview">
+            <div class="empty-state-small">
+              <p>Nenhuma mídia selecionada</p>
+            </div>
+          </div>
         </div>
 
         <div class="form-group">
@@ -814,7 +1238,7 @@
 
   <!-- Modal: Adicionar/Editar Shot -->
   <div id="shotModal" class="modal">
-    <div class="modal-content">
+    <div class="modal-content modal-content-large">
       <div class="modal-header">
         <h2 id="shotModalTitle">Adicionar Shot</h2>
         <button class="modal-close" onclick="closeShotModal()">×</button>
@@ -828,10 +1252,83 @@
           <small>Identificador único para este shot</small>
         </div>
 
+        <!-- Gatilho do Shot -->
+        <div class="form-group">
+          <label>Gatilho do Shot *</label>
+          <div class="trigger-toggle-group">
+            <button type="button" class="btn-pill trigger-option active" data-trigger="start" onclick="selectShotTrigger('start')">
+              🚀 A partir do /start
+            </button>
+            <button type="button" class="btn-pill trigger-option" data-trigger="pix_created" onclick="selectShotTrigger('pix_created')">
+              💳 Após gerar o PIX
+            </button>
+          </div>
+          <input type="hidden" id="shotTrigger" name="trigger_type" value="start">
+          <small>Define quando este shot será disparado</small>
+        </div>
+
+        <!-- Tipo de Agendamento -->
+        <div class="form-group">
+          <label>Tipo de Disparo *</label>
+          <div class="trigger-toggle-group">
+            <button type="button" class="btn-pill schedule-option active" data-schedule="immediate" onclick="selectShotScheduleType('immediate')">
+              ⚡ Disparo Imediato
+            </button>
+            <button type="button" class="btn-pill schedule-option" data-schedule="scheduled" onclick="selectShotScheduleType('scheduled')">
+              📅 Disparo Agendado
+            </button>
+          </div>
+          <input type="hidden" id="shotScheduleType" name="schedule_type" value="immediate">
+          <small>Escolha se o shot será enviado imediatamente ou em data/hora específica</small>
+        </div>
+
+        <!-- Campos de Agendamento (ocultos por padrão) -->
+        <div id="shotScheduleFields" style="display: none;">
+          <div class="form-group">
+            <label for="shotScheduleDate">Data do Disparo *</label>
+            <input type="date" id="shotScheduleDate" name="schedule_date">
+            <small>Selecione a data para o disparo</small>
+          </div>
+
+          <div class="form-group">
+            <label for="shotScheduleTime">Horário do Disparo *</label>
+            <select id="shotScheduleTime" name="schedule_time">
+              <option value="">Selecione o horário</option>
+            </select>
+            <small>Horários disponíveis de 5 em 5 minutos</small>
+          </div>
+        </div>
+
         <div class="form-group">
           <label for="shotContent">Conteúdo da Mensagem *</label>
           <textarea id="shotContent" name="content" placeholder="Digite a mensagem..." required></textarea>
           <small>Suporta templates: {user_name}, {user_id}, {bot_name}</small>
+        </div>
+
+        <!-- Seção de Planos do Shot -->
+        <div class="downsell-section">
+          <div class="downsell-section-header">
+            <label>Plano(s) deste Shot (máx. 10)</label>
+            <button type="button" id="addShotPlanBtn" class="btn-secondary btn-small" onclick="addShotPlan()">+ Adicionar plano</button>
+          </div>
+          <div id="shotPlansList" class="downsell-plans-list">
+            <div class="empty-state-small">
+              <p>Nenhum plano configurado</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Seção de Mídia do Shot -->
+        <div class="downsell-section">
+          <div class="downsell-section-header">
+            <label>Mídia do Shot (opcional, máx. 1)</label>
+            <button type="button" id="selectShotMediaBtn" class="btn-secondary btn-small" onclick="selectShotMedia()">📎 Selecionar mídia</button>
+          </div>
+          <div id="shotMediaPreview" class="downsell-media-preview">
+            <div class="empty-state-small">
+              <p>Nenhuma mídia selecionada</p>
+            </div>
+          </div>
         </div>
 
         <div class="form-group">

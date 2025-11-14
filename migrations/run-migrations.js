@@ -41,7 +41,12 @@ const migrations = [
   '008_add_queue_tables.sql',
   '009_extend_payments_pix.sql',
   '010_extend_shots_filter_criteria.sql',
-  '014_fix_bot_messages_content_json.sql'
+  '014_fix_bot_messages_content_json.sql',
+  '019_add_webhook_secret_token.sql',
+  '019_add_blocked_to_bot_users.sql',
+  '020_add_price_cents_to_funnel_events.sql',
+  '021_add_trigger_type_to_bot_downsells.sql',
+  '022_add_shot_scheduling_fields.sql'
 ];
 
 async function runMigrations() {

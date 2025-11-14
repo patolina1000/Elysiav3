@@ -25,6 +25,7 @@ const metricsRouter = require('./routes/metrics');
 const adminBotsRouter = require('./routes/admin-bots');
 const adminBotConfigRouter = require('./routes/admin-bot-config');
 const adminMediaRouter = require('./routes/admin-media');
+const adminControlKpisRouter = require('./routes/admin-control-kpis');
 const ngrokWebhooksRouter = require('./routes/ngrok-webhooks');
 const publicUrlRouter = require('./routes/public-url');
 
@@ -32,7 +33,11 @@ const publicUrlRouter = require('./routes/public-url');
 const BotEngine = require('./modules/bot-engine');
 const BotService = require('./modules/bot-service');
 const QueueScheduler = require('./scheduler');
+const ScheduledShotsWorker = require('./scheduled-shots-worker');
 const NgrokManager = require('./modules/ngrok-manager');
+const botTokenCache = require('./modules/bot-token-cache');
+const { getCryptoService } = require('./modules/crypto-singleton');
+const publicUrlManager = require('./modules/public-url-manager');
 
 const PORT = config.port;
 
@@ -80,6 +85,7 @@ app.use((req, res, next) => {
   req.botEngine = botEngine;
   req.botService = botService;
   req.ngrokManager = ngrokManager;
+  req.app = app; // Disponibilizar app para acessar app.get('paymentGateway')
   next();
 });
 
@@ -101,6 +107,7 @@ app.post('/api/admin/bots/:id/media/upload', upload.single('file'), (req, res, n
 
 app.use('/api/admin/bots', adminBotConfigRouter); // Config detalhada de bots
 app.use('/api/admin/bots', adminMediaRouter); // Upload de mídia com warmup
+app.use('/api/admin/bots', adminControlKpisRouter); // KPIs de controle
 app.use('/api/ngrok', ngrokWebhooksRouter); // Gerenciamento de webhooks ngrok
 app.use('/api/public-url', publicUrlRouter); // URL pública do ngrok
 
@@ -119,6 +126,10 @@ app.use((err, req, res, next) => {
 const queueScheduler = new QueueScheduler(pool);
 queueScheduler.start(5000); // Processar filas a cada 5 segundos
 
+// Inicializar worker de shots agendados
+const scheduledShotsWorker = new ScheduledShotsWorker();
+scheduledShotsWorker.start(60000); // Verificar shots agendados a cada 1 minuto
+
 // Inicializar ngrok (se habilitado)
 async function initializeNgrok() {
   if (!config.useNgrok) {
@@ -134,6 +145,13 @@ async function initializeNgrok() {
       console.log(`[NGROK] ✓ Inicializado com sucesso`);
       console.log(`[NGROK] URL pública: ${ngrokManager.getPublicUrl()}`);
       
+      // Injetar ngrokManager no publicUrlManager
+      publicUrlManager.setNgrokManager(ngrokManager);
+      
+      // Log de informações da URL pública
+      const urlInfo = publicUrlManager.getInfo();
+      console.log(`[PUBLIC_URL] Fonte: ${urlInfo.source} | Base: ${urlInfo.baseUrl}`);
+      
       // Registrar webhooks de todos os bots ativos
       await registerAllBotWebhooks();
     } else {
@@ -148,11 +166,8 @@ async function initializeNgrok() {
 // Registrar webhooks de todos os bots ativos
 async function registerAllBotWebhooks() {
   try {
-    const { getCryptoService } = require('./modules/crypto-singleton');
-    const crypto = getCryptoService();
-
     const result = await pool.query(
-      `SELECT id, slug, token_encrypted, token_status FROM bots WHERE active = TRUE AND token_encrypted IS NOT NULL AND token_status = 'validated'`
+      `SELECT id, slug, token_status FROM bots WHERE active = TRUE AND token_encrypted IS NOT NULL AND token_status = 'validated'`
     );
 
     if (result.rows.length === 0) {
@@ -164,11 +179,11 @@ async function registerAllBotWebhooks() {
 
     for (const bot of result.rows) {
       try {
-        // Descriptografar token
-        const botToken = crypto.decrypt(bot.token_encrypted);
+        // Obter token do cache (já descriptografado no boot)
+        const botToken = botTokenCache.getToken(bot.id);
         
         if (!botToken) {
-          console.warn(`[NGROK] Bot ${bot.slug} falha ao descriptografar token, pulando...`);
+          console.warn(`[NGROK] Bot ${bot.slug} sem token no cache, pulando...`);
           continue;
         }
 
@@ -176,6 +191,15 @@ async function registerAllBotWebhooks() {
         
         if (webhookResult.ok) {
           console.log(`[NGROK] ✓ Webhook registrado: ${bot.slug}`);
+          
+          // Salvar secret_token no banco e cache
+          if (webhookResult.secretToken) {
+            await pool.query(
+              'UPDATE bots SET webhook_secret_token = $1 WHERE id = $2',
+              [webhookResult.secretToken, bot.id]
+            );
+            botTokenCache.setSecretToken(bot.id, webhookResult.secretToken);
+          }
         } else {
           console.warn(`[NGROK] ✗ Erro ao registrar webhook para ${bot.slug}: ${webhookResult.error}`);
         }
@@ -195,8 +219,46 @@ app.listen(PORT, async () => {
   console.log(`[INFO] Banco de dados: conectado via DATABASE_URL`);
   console.log(`[INFO] Scheduler de filas iniciado`);
   
-  // Inicializar ngrok após servidor estar pronto
+  // Inicializar cache de tokens (descriptografar no boot, não no hot path)
+  try {
+    const crypto = getCryptoService();
+    await botTokenCache.initialize(pool, crypto);
+    console.log('[INFO] Cache de tokens inicializado');
+  } catch (error) {
+    console.error('[ERRO] Falha ao inicializar cache de tokens:', error.message);
+  }
+  
+  // Inicializar ngrok PRIMEIRO (para ter URL pública disponível)
   await initializeNgrok();
+  
+  // Inicializar gateways de pagamento DEPOIS do ngrok
+  try {
+    const PaymentGateway = require('./modules/payment-gateway');
+    const PushinPayAdapter = require('./modules/gateways/pushinpay-adapter');
+    
+    const paymentGateway = new PaymentGateway(pool);
+    
+    // Registrar PushinPay (webhook_url é dinâmica via publicUrlManager)
+    const pushinpayAdapter = new PushinPayAdapter({
+      apiKey: process.env.PUSHINPAY_TOKEN,
+      baseUrl: process.env.PUSHINPAY_BASE_URL
+    });
+    paymentGateway.registerGateway('pushinpay', pushinpayAdapter);
+    
+    // Tornar disponível globalmente para as rotas
+    app.set('paymentGateway', paymentGateway);
+    
+    // Log de webhook URL da PushinPay
+    const pushinpayWebhookUrl = pushinpayAdapter.getWebhookUrl();
+    if (pushinpayWebhookUrl) {
+      console.log(`[INFO] Gateways de pagamento inicializados: pushinpay`);
+      console.log(`[INFO] PushinPay webhook URL: ${pushinpayWebhookUrl}`);
+    } else {
+      console.warn('[WARN] PushinPay inicializado mas webhook URL não disponível');
+    }
+  } catch (error) {
+    console.error('[ERRO] Falha ao inicializar gateways de pagamento:', error.message);
+  }
 });
 
 // Graceful shutdown

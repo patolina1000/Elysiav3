@@ -14,6 +14,8 @@
  */
 
 const axios = require('axios');
+const telegramClient = require('./telegram-http-client');
+const crypto = require('crypto');
 
 class NgrokManager {
   constructor() {
@@ -111,24 +113,27 @@ class NgrokManager {
 
       const webhookUrl = `${this.publicUrl}/tg/${slug}/webhook`;
       
-      const response = await axios.post(
-        `https://api.telegram.org/bot${botToken}/setWebhook`,
-        {
-          url: webhookUrl,
-          allowed_updates: ['message', 'callback_query']
-        },
-        { timeout: 10000 }
-      );
+      // Gerar secret_token único para validação de origem
+      const secretToken = crypto.randomBytes(32).toString('hex');
+      
+      // Usar cliente HTTP otimizado com keep-alive
+      const response = await telegramClient.post(botToken, 'setWebhook', {
+        url: webhookUrl,
+        allowed_updates: ['message', 'callback_query', 'my_chat_member'],
+        max_connections: 80,        // Aumentar throughput (padrão: 40, máx: 100)
+        secret_token: secretToken   // Token para validação rápida de origem
+      });
 
-      if (response.data.ok) {
-        console.log(`[NGROK][TELEGRAM] Webhook registrado: bot=${slug} url=${webhookUrl}`);
+      if (response.ok) {
+        console.log(`[NGROK][TELEGRAM] Webhook registrado: bot=${slug} url=${webhookUrl} max_conn=80`);
         return {
           ok: true,
           webhookUrl,
-          description: response.data.description
+          secretToken,  // Retornar para salvar no banco
+          description: response.description
         };
       } else {
-        throw new Error(`Telegram API error: ${response.data.description}`);
+        throw new Error(`Telegram API error: ${response.description}`);
       }
     } catch (error) {
       console.error(`[NGROK][TELEGRAM] Erro ao registrar webhook: bot=${slug} error=${error.message}`);
@@ -145,18 +150,15 @@ class NgrokManager {
    */
   async getTelegramWebhookInfo(botToken) {
     try {
-      const response = await axios.get(
-        `https://api.telegram.org/bot${botToken}/getWebhookInfo`,
-        { timeout: 10000 }
-      );
+      const response = await telegramClient.get(botToken, 'getWebhookInfo');
 
-      if (response.data.ok) {
+      if (response.ok) {
         return {
           ok: true,
-          info: response.data.result
+          info: response.result
         };
       } else {
-        throw new Error(`Telegram API error: ${response.data.description}`);
+        throw new Error(`Telegram API error: ${response.description}`);
       }
     } catch (error) {
       console.error(`[NGROK][TELEGRAM] Erro ao obter webhook info: error=${error.message}`);
@@ -173,17 +175,13 @@ class NgrokManager {
    */
   async removeTelegramWebhook(botToken) {
     try {
-      const response = await axios.post(
-        `https://api.telegram.org/bot${botToken}/setWebhook`,
-        { url: '' },
-        { timeout: 10000 }
-      );
+      const response = await telegramClient.post(botToken, 'setWebhook', { url: '' });
 
-      if (response.data.ok) {
+      if (response.ok) {
         console.log('[NGROK][TELEGRAM] Webhook removido');
         return { ok: true };
       } else {
-        throw new Error(`Telegram API error: ${response.data.description}`);
+        throw new Error(`Telegram API error: ${response.description}`);
       }
     } catch (error) {
       console.error(`[NGROK][TELEGRAM] Erro ao remover webhook: error=${error.message}`);

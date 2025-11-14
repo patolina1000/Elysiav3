@@ -35,9 +35,14 @@ if (!connectionString) {
 
 // Criar pool com SSL para ambientes remotos (Render, Heroku, etc.)
 // SSL é necessário para conexões remotas seguras
+// Pool pré-aquecido: mantém conexões ativas para evitar overhead no hot path
 const pool = new Pool({
   connectionString,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  min: 2,                    // Mínimo de 2 conexões sempre ativas (pré-aquecidas)
+  max: 10,                   // Máximo de 10 conexões simultâneas
+  idleTimeoutMillis: 30000,  // Manter conexões idle por 30s antes de fechar
+  connectionTimeoutMillis: 5000  // Timeout de 5s para criar nova conexão
 });
 
 // Listeners para eventos de erro do pool

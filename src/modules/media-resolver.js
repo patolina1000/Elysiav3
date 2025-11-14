@@ -15,10 +15,51 @@
  * 5. Retornar array de mídias resolvidas (com tg_file_id)
  */
 
+// OTIMIZAÇÃO CRÍTICA: Cache global compartilhado entre todas as instâncias
+const GLOBAL_MEDIA_CACHE = new Map();
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 horas (86400000ms)
+
 class MediaResolver {
   constructor(pool, config = {}) {
     this.pool = pool;
     this.config = config;
+  }
+
+  /**
+   * Limpar cache expirado
+   */
+  _cleanExpiredCache() {
+    const now = Date.now();
+    for (const [key, entry] of GLOBAL_MEDIA_CACHE.entries()) {
+      if (entry.expiry < now) {
+        GLOBAL_MEDIA_CACHE.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Buscar mídia no cache em memória primeiro
+   */
+  _getCachedMedia(botSlug, kind, sha256) {
+    const key = `${botSlug}:${kind}:${sha256}`;
+    const entry = GLOBAL_MEDIA_CACHE.get(key);
+    
+    if (entry && entry.expiry > Date.now()) {
+      return entry.data;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Salvar mídia no cache em memória
+   */
+  _setCachedMedia(botSlug, kind, sha256, data) {
+    const key = `${botSlug}:${kind}:${sha256}`;
+    GLOBAL_MEDIA_CACHE.set(key, {
+      data,
+      expiry: Date.now() + CACHE_TTL
+    });
   }
 
   /**
@@ -33,6 +74,11 @@ class MediaResolver {
     const reasonsSkipped = [];
     const resolvedMedias = [];
     const totalInConfig = Array.isArray(mediasInConfig) ? mediasInConfig.length : 0;
+
+    // OTIMIZAÇÃO: Limpeza periódica do cache (a cada 100 requests)
+    if (Math.random() < 0.01) { // 1% de chance
+      this._cleanExpiredCache();
+    }
 
     console.info(`START:MEDIA_RESOLVE_START { mediasInConfig:${totalInConfig} }`);
 
@@ -54,22 +100,39 @@ class MediaResolver {
           continue;
         }
 
-        // Buscar em media_cache por (bot_slug, kind, key)
-        const cacheResult = await this.pool.query(
-          `SELECT id, tg_file_id, tg_file_unique_id, status, warmup_chat_id, warmup_message_id
-           FROM media_cache
-           WHERE bot_slug = $1 AND kind = $2 AND sha256 = $3
-           LIMIT 1`,
-          [botSlug, mediaKind, mediaKey]
-        );
+        // OTIMIZAÇÃO: Buscar no cache em memória primeiro
+        let cachedMedia = this._getCachedMedia(botSlug, mediaKind, mediaKey);
+        
+        if (cachedMedia) {
+          console.log(`[MEDIA_RESOLVER] Mídia ${i} CACHE HIT: kind=${mediaKind}`);
+        } else {
+          console.log(`[MEDIA_RESOLVER] Mídia ${i} CACHE MISS: kind=${mediaKind}`);
+          // Se não está no cache em memória, buscar no banco
+          const queryStart = Date.now();
+          const cacheResult = await this.pool.query(
+            `SELECT id, tg_file_id, tg_file_unique_id, status
+             FROM media_cache
+             WHERE bot_slug = $1 AND kind = $2 AND sha256 = $3
+             LIMIT 1`,
+            [botSlug, mediaKind, mediaKey]
+          );
+          const queryDuration = Date.now() - queryStart;
+          if (queryDuration > 100) {
+            console.warn(`[MEDIA_RESOLVER] Query lenta: ${queryDuration}ms`);
+          }
 
-        if (cacheResult.rows.length === 0) {
-          reasonsSkipped.push(`media_${i}_not_in_cache`);
-          console.warn(`[MEDIA_RESOLVER] Mídia ${i} não encontrada em cache: kind=${mediaKind}, key=${mediaKey.substring(0, 20)}...`);
-          continue;
+          if (cacheResult.rows.length === 0) {
+            reasonsSkipped.push(`media_${i}_not_in_cache`);
+            console.warn(`[MEDIA_RESOLVER] Mídia ${i} não encontrada em cache: kind=${mediaKind}, key=${mediaKey.substring(0, 20)}...`);
+            continue;
+          }
+
+          cachedMedia = cacheResult.rows[0];
+          
+          // CORREÇÃO: Sempre salvar no cache, mesmo se inválida (para evitar queries repetidas)
+          this._setCachedMedia(botSlug, mediaKind, mediaKey, cachedMedia);
+          console.log(`[MEDIA_RESOLVER] Mídia ${i} CACHED: kind=${mediaKind}, valid=${Boolean(cachedMedia.tg_file_id && cachedMedia.status === 'ready')}`);
         }
-
-        const cachedMedia = cacheResult.rows[0];
 
         // Validar que tem tg_file_id e status='ready'
         if (!cachedMedia.tg_file_id) {
